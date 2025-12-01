@@ -11,6 +11,7 @@
     on 1001Tracklists.com.
     
     Configuration is loaded from config.json in the script directory if present.
+    Event aliases for search boosting are loaded from aliases.json if present.
     Command-line parameters override config values.
     
     Login cookies are cached in .1001tl-cookies.json to speed up consecutive runs.
@@ -65,7 +66,7 @@
     Parse and display chapters without processing.
 
 .PARAMETER CreateConfig
-    Generate a default config.json file in the script directory and exit.
+    Generate default config.json and aliases.json files in the script directory and exit.
 
 .EXAMPLE
     .\Add-TracklistChapters.ps1 -InputFile "2025 - AMF - Sub Zero Project.webm"
@@ -172,9 +173,10 @@ begin {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
 
-    # Determine script directory for config file
+    # Determine script directory for config and aliases files
     $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
     $configPath = Join-Path $scriptDir 'config.json'
+    $aliasesPath = Join-Path $scriptDir 'aliases.json'
 
     #region Config Functions
 
@@ -237,6 +239,64 @@ begin {
         Write-Host "Configuration saved to: $Path" -ForegroundColor Green
     }
 
+    function New-DefaultAliases {
+        <#
+        .SYNOPSIS
+            Creates default event aliases for abbreviation matching.
+        .DESCRIPTION
+            Returns a hashtable mapping common event abbreviations to their full names.
+            Used as fallback when dynamic abbreviation detection fails (e.g., lowercase
+            abbreviations in filenames, or unofficial abbreviations like TML).
+        #>
+        return [ordered]@{
+            AMF     = 'Amsterdam Music Festival'
+            ADE     = 'Amsterdam Dance Event'
+            EDC     = 'Electric Daisy Carnival'
+            UMF     = 'Ultra Music Festival'
+            ASOT    = 'A State of Trance'
+            ABGT    = 'Above & Beyond Group Therapy'
+            WAO138  = "Who's Afraid of 138"
+            FSOE    = 'Future Sound of Egypt'
+            GDJB    = 'Global DJ Broadcast'
+            SW4     = 'South West Four'
+            TML     = 'Tomorrowland'
+            TL      = 'Tomorrowland'
+            DWP     = 'Djakarta Warehouse Project'
+            MMW     = 'Miami Music Week'
+        }
+    }
+
+    function Get-Aliases {
+        <#
+        .SYNOPSIS
+            Loads event aliases from aliases.json if it exists.
+        .DESCRIPTION
+            Returns a hashtable with lowercase keys for case-insensitive lookup.
+        #>
+        param(
+            [Parameter(Mandatory)]
+            [string]$Path
+        )
+
+        if (Test-Path $Path) {
+            try {
+                $jsonObj = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+                # Convert to hashtable with lowercase keys for case-insensitive lookup
+                $aliases = @{}
+                $jsonObj.PSObject.Properties | ForEach-Object { 
+                    $aliases[$_.Name.ToLower()] = $_.Value 
+                }
+                Write-Verbose "Loaded $($aliases.Count) aliases from: $Path"
+                return $aliases
+            }
+            catch {
+                Write-Warning "Failed to load aliases from $Path`: $_"
+            }
+        }
+
+        return @{}
+    }
+
     function ConvertTo-SearchQuery {
         <#
         .SYNOPSIS
@@ -290,19 +350,49 @@ begin {
     # Handle CreateConfig parameter set
     if ($PSCmdlet.ParameterSetName -eq 'CreateConfig') {
         $defaultConfig = New-DefaultConfig
+        $defaultAliases = New-DefaultAliases
 
+        # Handle config.json
+        $writeConfig = $true
         if (Test-Path $configPath) {
-            Write-Warning "Config file already exists: $configPath"
+            Write-Warning "config.json already exists: $configPath"
             $overwrite = Read-Host "Overwrite? (y/N)"
-            if ($overwrite -notmatch '^[Yy]') {
-                Write-Host "Cancelled." -ForegroundColor Yellow
-                return
-            }
+            $writeConfig = $overwrite -match '^[Yy]'
         }
 
-        Save-Config -Path $configPath -Config $defaultConfig
-        Write-Host "`nDefault configuration created. Edit the file to add your 1001Tracklists.com credentials:" -ForegroundColor Cyan
-        Write-Host $configPath
+        # Handle aliases.json
+        $writeAliases = $true
+        if (Test-Path $aliasesPath) {
+            Write-Warning "aliases.json already exists: $aliasesPath"
+            $overwrite = Read-Host "Overwrite? (y/N)"
+            $writeAliases = $overwrite -match '^[Yy]'
+        }
+
+        # Write files as needed
+        if ($writeConfig) {
+            Save-Config -Path $configPath -Config $defaultConfig
+        }
+        else {
+            Write-Host "Skipped config.json" -ForegroundColor Yellow
+        }
+
+        if ($writeAliases) {
+            $defaultAliases | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $aliasesPath -Encoding UTF8
+            Write-Host "Aliases saved to: $aliasesPath" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Skipped aliases.json" -ForegroundColor Yellow
+        }
+
+        # Show summary
+        if ($writeConfig) {
+            Write-Host "`nEdit config.json to add your 1001Tracklists.com credentials:" -ForegroundColor Cyan
+            Write-Host $configPath
+        }
+        if ($writeAliases) {
+            Write-Host "`nEdit aliases.json to add custom event abbreviations:" -ForegroundColor Cyan
+            Write-Host $aliasesPath
+        }
         return
     }
 
@@ -326,6 +416,15 @@ begin {
     }
     if (-not $PSBoundParameters.ContainsKey('NoDurationFilter') -and $config.NoDurationFilter) {
         $NoDurationFilter = [bool]$config.NoDurationFilter
+    }
+
+    # Load event aliases for abbreviation matching
+    $script:EventAliases = Get-Aliases -Path $aliasesPath
+    if ($script:EventAliases.Count -eq 0) {
+        # Use defaults if no aliases file exists
+        $defaultAliases = New-DefaultAliases
+        $defaultAliases.Keys | ForEach-Object { $script:EventAliases[$_.ToLower()] = $defaultAliases[$_] }
+        Write-Verbose "Using default aliases (no aliases.json found)"
     }
 
     #region 1001Tracklists Configuration
@@ -651,7 +750,10 @@ begin {
             # Parse query for keywords and year
             $queryParts = Get-QueryParts -Query $Query
             
-            Write-Verbose "Query parts: Year=$($queryParts.Year), Keywords=[$($queryParts.Keywords -join ', ')], Abbreviations=[$($queryParts.Abbreviations -join ', ')], EventPatterns=[$($queryParts.EventPatterns | ForEach-Object { "$($_.Type)$($_.Number)" })]"
+            $aliasesInfo = if ($queryParts.ResolvedAliases.Count -gt 0) {
+                $queryParts.ResolvedAliases | ForEach-Object { "$($_.Alias)->$($_.Target)" }
+            } else { @() }
+            Write-Verbose "Query parts: Year=$($queryParts.Year), Keywords=[$($queryParts.Keywords -join ', ')], Abbreviations=[$($queryParts.Abbreviations -join ', ')], Aliases=[$($aliasesInfo -join ', ')], EventPatterns=[$($queryParts.EventPatterns | ForEach-Object { "$($_.Type)$($_.Number)" })]"
             
             # Find date range for recency scoring
             $dates = $results | Where-Object { $_.Date } | ForEach-Object { 
@@ -765,6 +867,7 @@ begin {
             Detects special patterns commonly used in filenames:
             - WE1, WE2, W1, W2 -> Weekend 1, Weekend 2
             - D1, D2 -> Day 1, Day 2
+            Also resolves event aliases from aliases.json (case-insensitive).
         #>
         param(
             [Parameter(Mandatory)]
@@ -779,6 +882,7 @@ begin {
         $keywords = @()
         $abbreviations = @()
         $eventPatterns = @()
+        $resolvedAliases = @()
 
         foreach ($word in $words) {
             if ($word -match '^(19|20)\d{2}$') {
@@ -798,18 +902,28 @@ begin {
                     $abbreviations += $word
                 }
                 
+                # Check if word matches an alias (case-insensitive)
+                $wordLower = $word.ToLower()
+                if ($script:EventAliases.ContainsKey($wordLower)) {
+                    $resolvedAliases += @{ 
+                        Alias  = $word
+                        Target = $script:EventAliases[$wordLower] 
+                    }
+                }
+                
                 # Filter out very short words (at, the, in, etc.) but keep pattern words as keywords too
                 if ($word.Length -gt 2) {
-                    $keywords += $word.ToLower()
+                    $keywords += $wordLower
                 }
             }
         }
 
         return @{
-            Year          = $year
-            Keywords      = $keywords
-            Abbreviations = $abbreviations
-            EventPatterns = $eventPatterns
+            Year            = $year
+            Keywords        = $keywords
+            Abbreviations   = $abbreviations
+            EventPatterns   = $eventPatterns
+            ResolvedAliases = $resolvedAliases
         }
     }
 
@@ -915,8 +1029,30 @@ begin {
             }
         }
 
+        # Alias matching (for lowercase abbreviations or unofficial abbreviations like TML)
+        $aliasScore = 0
+        $matchedAliases = @()
+        if ($QueryParts.ResolvedAliases.Count -gt 0) {
+            $titleNormalized = (Remove-Diacritics $Result.Title).ToLower()
+            
+            foreach ($alias in $QueryParts.ResolvedAliases) {
+                $targetNormalized = (Remove-Diacritics $alias.Target).ToLower()
+                
+                # Check if target event name appears in title
+                if ($titleNormalized -match [regex]::Escape($targetNormalized)) {
+                    $aliasScore += 35
+                    $matchedAliases += @{ Alias = $alias.Alias; Target = $alias.Target }
+                }
+            }
+            $score += $aliasScore
+            if ($matchedAliases.Count -gt 0) {
+                $aliasInfo = $matchedAliases | ForEach-Object { "$($_.Alias)->$($_.Target)" }
+                $breakdown += "Alias:$aliasScore($($aliasInfo -join ','))"
+            }
+        }
+
         # Keyword score (important - identifies the correct event/artist)
-        # Matched abbreviations count as matched keywords
+        # Matched abbreviations and aliases count as matched keywords
         $kwScore = 0
         if ($QueryParts.Keywords.Count -gt 0) {
             $titleNormalized = (Remove-Diacritics $Result.Title).ToLower()
@@ -936,6 +1072,11 @@ begin {
                 elseif ($matchedAbbreviations | Where-Object { $_.Abbrev -eq $keyword.ToUpper() }) {
                     $matchedCount++
                     $matchedKws += "$keyword(abbr)"
+                }
+                # Check if keyword matches an alias that was resolved
+                elseif ($matchedAliases | Where-Object { $_.Alias.ToLower() -eq $keywordNormalized }) {
+                    $matchedCount++
+                    $matchedKws += "$keyword(alias)"
                 }
             }
             
