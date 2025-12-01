@@ -734,14 +734,16 @@ begin {
             $date = if ($dateMatch.Success) { $dateMatch.Groups[1].Value.Trim() } else { $null }
 
             $results.Add([PSCustomObject]@{
-                Index        = 0  # Will be set after sorting
-                Id           = $id
-                Title        = $title
-                Url          = "$script:BaseUrl$url"
-                Duration     = $duration
-                DurationMins = $durationMins
-                Date         = $date
-                Score        = 0  # Will be calculated
+                Index               = 0      # Will be set after sorting
+                Id                  = $id
+                Title               = $title
+                Url                 = "$script:BaseUrl$url"
+                Duration            = $duration
+                DurationMins        = $durationMins
+                Date                = $date
+                Score               = 0      # Will be calculated
+                MatchedKeywordCount = 0      # Will be calculated
+                HasEventMatch       = $false # Will be calculated
             })
         }
 
@@ -769,8 +771,34 @@ begin {
             }
 
             foreach ($result in $results) {
-                $score = Get-RelevanceScore -Result $result -QueryParts $queryParts -VideoDurationMinutes $DurationMinutes -MinDate $minDate -DateRange $dateRange
-                $result.Score = $score
+                $scoreInfo = Get-RelevanceScore -Result $result -QueryParts $queryParts -VideoDurationMinutes $DurationMinutes -MinDate $minDate -DateRange $dateRange
+                $result.Score = $scoreInfo.Score
+                $result.MatchedKeywordCount = $scoreInfo.MatchedKeywordCount
+                $result.HasEventMatch = $scoreInfo.HasEventMatch
+            }
+
+            # Always filter out results with 0 keyword matches (pure noise from duration/year)
+            $beforeCount = $results.Count
+            $results = [System.Collections.Generic.List[PSCustomObject]]@(
+                $results | Where-Object { $_.MatchedKeywordCount -gt 0 }
+            )
+            $zeroKwFiltered = $beforeCount - $results.Count
+            if ($zeroKwFiltered -gt 0) {
+                Write-Verbose "Filtered out $zeroKwFiltered results with 0 keyword matches"
+            }
+
+            # Filter out low-quality results when an event is specified
+            # If query has aliases or abbreviations, remove results with ≤1 keyword match and no event match
+            $hasEventInQuery = ($queryParts.ResolvedAliases.Count -gt 0) -or ($queryParts.Abbreviations.Count -gt 0)
+            if ($hasEventInQuery) {
+                $beforeCount = $results.Count
+                $results = [System.Collections.Generic.List[PSCustomObject]]@(
+                    $results | Where-Object { $_.HasEventMatch -or $_.MatchedKeywordCount -gt 1 }
+                )
+                $filteredCount = $beforeCount - $results.Count
+                if ($filteredCount -gt 0) {
+                    Write-Verbose "Filtered out $filteredCount low-relevance results (no event match, ≤1 keyword)"
+                }
             }
 
             # Sort by score descending
@@ -961,6 +989,7 @@ begin {
 
         $score = 0
         $breakdown = @()
+        $matchedCount = 0
 
         # Duration score (most important - indicates same recording)
         # Exact match is strong positive, large mismatch is penalized
@@ -1146,7 +1175,11 @@ begin {
         $finalScore = [Math]::Round($score, 2)
         Write-Verbose "  Score $finalScore for '$($Result.Title.Substring(0, [Math]::Min(50, $Result.Title.Length)))...' [$($breakdown -join ' | ')]"
         
-        return $finalScore
+        return @{
+            Score               = $finalScore
+            MatchedKeywordCount = $matchedCount
+            HasEventMatch       = ($matchedAbbreviations.Count -gt 0) -or ($matchedAliases.Count -gt 0)
+        }
     }
 
     function Get-1001TracklistExport {

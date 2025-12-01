@@ -27,7 +27,7 @@ Navigate DJ sets, live recordings, and music mixes track by track.
 ## Installation
 
 1. Download `Add-TracklistChapters.ps1`
-2. Create a configuration file with your credentials:
+2. Create configuration files:
    ```powershell
    .\Add-TracklistChapters.ps1 -CreateConfig
    ```
@@ -42,6 +42,7 @@ Navigate DJ sets, live recordings, and music mixes track by track.
      "NoDurationFilter": false
    }
    ```
+4. Optionally edit `aliases.json` to add custom event abbreviations (see [Event Aliases](#event-aliases)).
 
 ## Usage
 
@@ -147,9 +148,16 @@ The script uses intelligent relevance scoring to find the best matching tracklis
 | **Duration** | -20 to +100 | ±1 min = 100, ±5 min = 80, ±15 min = 40, ±30 min = 10, >30 min = -20 |
 | **Keywords** | 0 to 75 | Proportional to matched keywords, +15 bonus if all match |
 | **Abbreviations** | +35 each | `AMF` → "Amsterdam Music Festival", `EDC` → "Electric Daisy Carnival" |
+| **Aliases** | +35 each | Matches from aliases.json (case-insensitive), e.g., `tml` → "Tomorrowland" |
 | **Event Patterns** | -30 to +40 | Correct pattern = +40, wrong pattern = -30 |
 | **Year** | +25 | Matches year in query to tracklist date |
 | **Recency** | 0 to 10 | Minor tiebreaker favoring newer tracklists |
+
+### Result Filtering
+
+Results with 0 keyword matches are always filtered out (these are pure noise from duration/year matching).
+
+Additionally, when an event is specified (via alias or abbreviation), results with only 1 keyword match and no event match are filtered out. This removes false positives like "House Party 133" matching "Swedish House Mafia".
 
 ### Smart Query Parsing
 
@@ -159,6 +167,7 @@ The script automatically handles common filename patterns:
 - **Accented characters**: `Tiësto` and `Tiesto` both match, `Château` matches `Chateau`
 - **Event patterns**: `WE2`, `W2`, `Weekend2` all recognized as "Weekend 2"
 - **Abbreviations**: Uppercase words like `AMF`, `EDC`, `ASOT` matched against full event names
+- **Aliases**: Any word matching a key in aliases.json (case-insensitive) boosts results containing the target event name
 
 ### Examples
 
@@ -202,6 +211,15 @@ Query: "Tiësto - Dreamstate 2025 (Full Set)"
 
 Score 164.9 for 'Tiësto @ The Dream Stage, Dreamstate SoCal...'
       [Dur:100(0m diff) | Kw:30(2/4) | Year:25 | Rec:9.9]
+```
+
+**Alias matching (lowercase/unofficial abbreviations):**
+```
+Query: "armin van buuren - asot 2025 - utrecht"
+       → asot matched via aliases.json to "A State of Trance"
+
+Score 184.5 for 'Armin van Buuren @ A State of Trance 1000, Utrecht...'
+      [Dur:100(0m diff) | Alias:35(asot->A State of Trance) | Kw:45(4/6) | Year:25 | Rec:4.5]
 ```
 
 ### Score Interpretation
@@ -251,7 +269,7 @@ Search Results (video: 47m):
 | `-Email` | 1001Tracklists.com email (overrides config) |
 | `-Password` | 1001Tracklists.com password (overrides config) |
 | `-Credential` | PSCredential object (alternative to Email/Password) |
-| `-CreateConfig` | Generate default config.json file |
+| `-CreateConfig` | Generate default config.json and aliases.json files |
 | `-Verbose` | Show detailed scoring breakdown and debug info |
 
 ## Configuration
@@ -270,6 +288,35 @@ The `config.json` file supports the following options:
 ```
 
 Command-line parameters always override config file values.
+
+## Event Aliases
+
+The `aliases.json` file maps event abbreviations to their full names for improved search matching. This helps when:
+- Using lowercase abbreviations in filenames (e.g., `asot` instead of `ASOT`)
+- Using unofficial abbreviations that can't be dynamically detected (e.g., `TML` for Tomorrowland)
+
+```json
+{
+  "AMF": "Amsterdam Music Festival",
+  "ADE": "Amsterdam Dance Event",
+  "EDC": "Electric Daisy Carnival",
+  "UMF": "Ultra Music Festival",
+  "ASOT": "A State of Trance",
+  "ABGT": "Above & Beyond Group Therapy",
+  "WAO138": "Who's Afraid of 138",
+  "FSOE": "Future Sound of Egypt",
+  "GDJB": "Global DJ Broadcast",
+  "SW4": "South West Four",
+  "TML": "Tomorrowland",
+  "TL": "Tomorrowland",
+  "DWP": "Djakarta Warehouse Project",
+  "MMW": "Miami Music Week"
+}
+```
+
+Alias matching is case-insensitive. When a filename contains an alias key (e.g., `asot`), results containing the target name (e.g., "A State of Trance") receive a +35 score boost.
+
+Add your own abbreviations for regional events or personal naming conventions.
 
 ## Behavior Notes
 
