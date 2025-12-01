@@ -138,43 +138,91 @@ Summary: 5 succeeded, 1 failed
 
 ## Search Algorithm
 
-The script uses intelligent relevance scoring to find the best matching tracklist:
+The script uses intelligent relevance scoring to find the best matching tracklist. Use `-Verbose` to see the scoring breakdown for each result.
 
-### Scoring Factors (in order of importance)
+### Scoring Factors
 
 | Factor | Points | Description |
 |--------|--------|-------------|
-| **Duration Match** | -20 to +100 | Exact duration match scores highest; large mismatches are penalized |
-| **Keywords** | 0 to 75 | Proportional to matched keywords, +15 bonus if all keywords match |
-| **Event Patterns** | -30 to +40 | Matches `WE1`/`Weekend 1`, `D2`/`Day 2`, etc. Wrong pattern is penalized |
-| **Abbreviations** | +35 each | Matches `AMF` to "Amsterdam Music Festival", `EDC` to "Electric Daisy Carnival" |
-| **Year** | +25 | Matches year in query (e.g., `2024`) to tracklist date |
-| **Recency** | 0 to 10 | Newer tracklists score slightly higher |
+| **Duration** | -20 to +100 | ±1 min = 100, ±5 min = 80, ±15 min = 40, ±30 min = 10, >30 min = -20 |
+| **Keywords** | 0 to 75 | Proportional to matched keywords, +15 bonus if all match |
+| **Abbreviations** | +35 each | `AMF` → "Amsterdam Music Festival", `EDC` → "Electric Daisy Carnival" |
+| **Event Patterns** | -30 to +40 | Correct pattern = +40, wrong pattern = -30 |
+| **Year** | +25 | Matches year in query to tracklist date |
+| **Recency** | 0 to 10 | Minor tiebreaker favoring newer tracklists |
 
 ### Smart Query Parsing
 
 The script automatically handles common filename patterns:
 
-- **YouTube IDs**: `Video Title [dQw4w9WgXcQ]` → strips the ID
-- **Accented characters**: `Château` and `Chateau` both match
+- **YouTube IDs**: `Video Title [dQw4w9WgXcQ]` → stripped automatically
+- **Accented characters**: `Tiësto` and `Tiesto` both match, `Château` matches `Chateau`
 - **Event patterns**: `WE2`, `W2`, `Weekend2` all recognized as "Weekend 2"
-- **Abbreviations**: Uppercase words like `AMF`, `EDC`, `ASOT` are matched against full event names
+- **Abbreviations**: Uppercase words like `AMF`, `EDC`, `ASOT` matched against full event names
 
-### Example Verbose Output
+### Examples
 
+**Event pattern matching (WE2 → Weekend 2):**
 ```
-VERBOSE: Query parts: Year=2024, Keywords=[belgium, otto, knows], Abbreviations=[], EventPatterns=[Weekend2]
-VERBOSE:   Score 215.4 for 'Otto Knows @ Tomorrowland Weekend 2...' [Dur:100(0m diff) | Kw:45(3/3) | Year:25 | Pat:40 | Rec:5.4]
+Query: "2025 - Tomorrowland Belgium - Martin Garrix WE2"
+QueryParts: Year=2025, Keywords=[tomorrowland, belgium, martin, garrix, we2], EventPatterns=[Weekend2]
+
+Score 219.2 for 'Martin Garrix @ Mainstage, Tomorrowland Weekend 2...'
+      [Dur:100(1m diff) | Kw:48(4/5) | Year:25 | Pat:40 | Rec:6.2]   ← Correct weekend, high score
+
+Score 124.9 for 'Cence Brothers @ House Of Fortune Stage, Tomorrowland Weekend 1...'
+      [Dur:100(1m diff) | Kw:24(2/5) | Year:25 | Pat:-30 | Rec:5.9]  ← Wrong weekend, penalized
 ```
+
+**Abbreviation matching (AMF, EDC):**
+```
+Query: "2025 AMF KI/KI B2B Armin van Buuren"
+QueryParts: Year=2025, Keywords=[amf, ki/ki, b2b, armin, van, buuren], Abbreviations=[AMF]
+
+Score 184.2 for 'Armin van Buuren & KI/KI @ Two Is One, Amsterdam Music Festival...'
+      [Dur:80(4m diff) | Abbr:35(AMF=AMF) | Kw:40(4/6) | Year:25 | Rec:4.2]  ← AMF matched
+
+Score 141.8 for 'Armin van Buuren - Piano...'
+      [Dur:80(5m diff) | Abbr:0 | Kw:30(3/6) | Year:25 | Rec:6.8]            ← No abbreviation match
+```
+
+**YouTube ID stripping:**
+```
+Query: "Marlon Hoffstadt Live at EDC Las Vegas 2025 [JX2STP6HL5k]"
+       → YouTube ID stripped, EDC detected as abbreviation
+
+Score 178.2 for 'Marlon Hoffstadt @ kineticFIELD, EDC Las Vegas...'
+      [Dur:100(0m diff) | Abbr:35(EDC(direct)) | Kw:38.2(7/11) | Rec:5]
+```
+
+**Accent-insensitive matching:**
+```
+Query: "Tiësto - Dreamstate 2025 (Full Set)"
+       → Tiësto normalized for matching
+
+Score 164.9 for 'Tiësto @ The Dream Stage, Dreamstate SoCal...'
+      [Dur:100(0m diff) | Kw:30(2/4) | Year:25 | Rec:9.9]
+```
+
+### Score Interpretation
+
+| Score Range | Meaning |
+|-------------|---------|
+| 200+ | Excellent match - likely the exact recording |
+| 150-200 | Good match - probably correct |
+| 100-150 | Partial match - review manually |
+| <100 | Poor match - likely wrong tracklist |
 
 ## Search Results Display
 
 ```
-Search Results (video: 54m):
+Search Results (video: 47m):
 --------------------------------------------------------------------------------------------------------------
-  1. Sub Zero Project @ Amsterdam Music Festival, Netherlands [📅 2025-10-25 | ⏱️ 54m ✓]
-  2. Sub Zero Project @ Defqon.1, Netherlands [📅 2025-06-28 | ⏱️ 55m ≈]
-  3. Sub Zero Project @ Reverze, Belgium [📅 2025-02-14 | ⏱️ 62m ~]
+  1. Armin van Buuren & KI/KI @ Two Is One, Amsterdam Music Festival, Netherlands [📅 2025-10-25 | ⏱️ 51m ≈]
+  2. Armin van Buuren - Piano [📅 2025-11-10 | ⏱️ 52m ≈]
+  3. Armin van Buuren @ SLAM! (Amsterdam Dance Event, Netherlands) [📅 2025-10-22 | ⏱️ 51m ≈]
+  4. Armin van Buuren @ Mainstage, Tomorrowland Brasil [📅 2025-10-10 | ⏱️ 58m ~]
+  5. Armin van Buuren @ Amsterdam Music Festival, Netherlands [📅 2025-10-25 | ⏱️ 84m ✗]
 --------------------------------------------------------------------------------------------------------------
 ```
 
@@ -182,7 +230,8 @@ Search Results (video: 54m):
 - ✓ (green) - Exact match (±1 minute)
 - ≈ (yellow) - Close match (±5 minutes)
 - ~ (dim) - Moderate difference (±15 minutes)
-- No marker - Larger difference
+- ✗ (red) - Poor match (>30 minutes difference)
+- No marker - Significant difference (±30 minutes)
 
 ## Parameters
 
