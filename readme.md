@@ -13,15 +13,18 @@ Navigate DJ sets, live recordings, and music mixes track by track.
 - 📅 **Event Pattern Detection** - Understands multi-day event notation (`WE1`, `WE2`, `Day1`, `D2`, etc.)
 - 🌍 **Accent-Insensitive Matching** - `Chateau` matches `Château`, `Ibanez` matches `Ibañez`
 - 🎬 **YouTube ID Stripping** - Automatically removes yt-dlp video IDs from filenames (e.g., `[dQw4w9WgXcQ]`)
-- ⚡ **Session Caching** - Login cookies cached for ~100 days for faster consecutive runs
+- ⚡ **Fast In-Place Editing** - Uses `mkvpropedit` for near-instant chapter embedding (no remuxing)
+- 🍪 **Session Caching** - Login cookies cached for ~100 days for faster consecutive runs
 - 🔄 **Duplicate Detection** - Skips files that already have identical chapters
+- 🔗 **URL Storage** - Stores tracklist URL in file for instant reuse on subsequent runs
 - 📦 **Pipeline Support** - Batch process multiple files via PowerShell pipeline
 - ⏭️ **Auto-Select Mode** - Fully automated chapter embedding for batch processing
+- 🛡️ **Rate Limit Protection** - Configurable delay between requests to avoid 1001Tracklists rate limits
 
 ## Requirements
 
 - PowerShell 5.1+ (Windows) or PowerShell Core 7+ (cross-platform)
-- [MKVToolNix](https://mkvtoolnix.download/) installed (provides `mkvmerge` and `mkvextract`)
+- [MKVToolNix](https://mkvtoolnix.download/) installed (provides `mkvmerge`, `mkvextract`, and `mkvpropedit`)
 - 1001Tracklists.com account (free, required for search functionality)
 
 ## Installation
@@ -39,7 +42,9 @@ Navigate DJ sets, live recordings, and music mixes track by track.
      "ChapterLanguage": "eng",
      "MkvMergePath": "",
      "ReplaceOriginal": false,
-     "NoDurationFilter": false
+     "NoDurationFilter": false,
+     "AutoSelect": false,
+     "DelaySeconds": 5
    }
    ```
 4. Optionally edit `aliases.json` to add custom event abbreviations (see [Event Aliases](#event-aliases)).
@@ -123,18 +128,31 @@ The script supports pipeline input for processing multiple files:
 # Process all MKV files with auto-select
 Get-ChildItem "D:\DJ Sets\*.mkv" | .\Add-TracklistChapters.ps1 -AutoSelect -ReplaceOriginal
 
-# Process all WEBM files with a specific search query
-Get-ChildItem "*.webm" | .\Add-TracklistChapters.ps1 -Tracklist "Festival Name 2025" -AutoSelect
+# Process all WEBM files recursively
+Get-ChildItem "D:\Videos\*.webm" -Recurse | .\Add-TracklistChapters.ps1 -AutoSelect -ReplaceOriginal
 
 # Preview chapters for all files without modifying
 Get-ChildItem "*.webm" | .\Add-TracklistChapters.ps1 -Preview
+```
+
+A delay is automatically added between files to avoid rate limiting (default: 5 seconds). You can adjust this:
+
+```powershell
+# Faster processing (may trigger rate limits)
+Get-ChildItem "*.mkv" | .\Add-TracklistChapters.ps1 -AutoSelect -DelaySeconds 2
+
+# More conservative delay
+Get-ChildItem "*.mkv" | .\Add-TracklistChapters.ps1 -AutoSelect -DelaySeconds 10
 ```
 
 A summary is displayed after batch processing:
 
 ```
 --------------------------------------------------
-Summary: 5 succeeded, 1 failed
+Summary: 10 files processed
+  7 chapters added
+  2 already up-to-date
+  1 skipped
 ```
 
 ## Search Algorithm
@@ -165,22 +183,22 @@ The script automatically handles common filename patterns:
 
 - **YouTube IDs**: `Video Title [dQw4w9WgXcQ]` → stripped automatically
 - **Accented characters**: `Tiësto` and `Tiesto` both match, `Château` matches `Chateau`
-- **Event patterns**: `WE2`, `W2`, `Weekend2` all recognized as "Weekend 2"
+- **Event patterns**: `WE2`, `W2`, `Weekend2` all recognized as "Weekend 2" and count as matched keywords
 - **Abbreviations**: Uppercase words like `AMF`, `EDC`, `ASOT` matched against full event names
 - **Aliases**: Any word matching a key in aliases.json (case-insensitive) boosts results containing the target event name
 
 ### Examples
 
-**Event pattern matching (WE2 → Weekend 2):**
+**Event pattern matching (WE1 → Weekend 1):**
 ```
-Query: "2025 - Tomorrowland Belgium - Martin Garrix WE2"
-QueryParts: Year=2025, Keywords=[tomorrowland, belgium, martin, garrix, we2], EventPatterns=[Weekend2]
+Query: "2025 - TML Belgium - Hardwell WE1"
+QueryParts: Year=2025, Keywords=[tml, belgium, hardwell, we1], Aliases=[TML->Tomorrowland], EventPatterns=[Weekend1]
 
-Score 219.2 for 'Martin Garrix @ Mainstage, Tomorrowland Weekend 2...'
-      [Dur:100(1m diff) | Kw:48(4/5) | Year:25 | Pat:40 | Rec:6.2]   ← Correct weekend, high score
+Score 290.1 for 'Hardwell @ Mainstage, Tomorrowland Weekend 1, Belgium...'
+      [Dur:100(1m diff) | Alias:35(TML->Tomorrowland) | Kw:75(4/4) | Year:25 | Pat:40 | Rec:5.1]
 
-Score 124.9 for 'Cence Brothers @ House Of Fortune Stage, Tomorrowland Weekend 1...'
-      [Dur:100(1m diff) | Kw:24(2/5) | Year:25 | Pat:-30 | Rec:5.9]  ← Wrong weekend, penalized
+Score 124.9 for 'Hardwell @ Mainstage, Tomorrowland Weekend 2, Belgium...'
+      [Dur:100(1m diff) | Alias:35(TML->Tomorrowland) | Kw:45(3/4) | Year:25 | Pat:-30 | Rec:5.9]  ← Wrong weekend, penalized
 ```
 
 **Abbreviation matching (AMF, EDC):**
@@ -260,16 +278,18 @@ Search Results (video: 47m):
 | `-TrackListFile` | Local text file with timestamps |
 | `-FromClipboard` | Read tracklist from clipboard |
 | `-AutoSelect` | Automatically select the top result |
+| `-DelaySeconds` | Delay between files in pipeline mode (default: 5, range: 0-60) |
 | `-NoDurationFilter` | Disable duration-based result filtering |
 | `-Preview` | Show chapters without modifying file |
+| `-IgnoreStoredUrl` | Force fresh search, ignoring any stored tracklist URL |
 | `-ReplaceOriginal` | Replace original file instead of creating new |
 | `-OutputFile` | Custom output filename |
 | `-ChapterLanguage` | Chapter language code (default: `eng`) |
-| `-MkvMergePath` | Custom path to mkvmerge.exe |
+| `-MkvMergePath` | Custom path to MKVToolNix directory |
 | `-Email` | 1001Tracklists.com email (overrides config) |
 | `-Password` | 1001Tracklists.com password (overrides config) |
 | `-Credential` | PSCredential object (alternative to Email/Password) |
-| `-CreateConfig` | Generate default config.json and aliases.json files |
+| `-CreateConfig` | Generate or update config.json and aliases.json files |
 | `-Verbose` | Show detailed scoring breakdown and debug info |
 
 ## Configuration
@@ -283,11 +303,29 @@ The `config.json` file supports the following options:
   "ChapterLanguage": "eng",
   "MkvMergePath": "",
   "ReplaceOriginal": false,
-  "NoDurationFilter": false
+  "NoDurationFilter": false,
+  "AutoSelect": false,
+  "DelaySeconds": 5
 }
 ```
 
 Command-line parameters always override config file values.
+
+### Updating Configuration
+
+Running `-CreateConfig` is non-destructive - it merges new default settings with your existing configuration:
+
+```powershell
+.\Add-TracklistChapters.ps1 -CreateConfig
+```
+
+Output:
+```
+config.json: Updated (added: AutoSelect, DelaySeconds)
+aliases.json: Unchanged (already up to date)
+```
+
+Your existing credentials and settings are preserved while new options are added.
 
 ## Event Aliases
 
@@ -320,35 +358,98 @@ Add your own abbreviations for regional events or personal naming conventions.
 
 ## Behavior Notes
 
+### Fast In-Place Editing
+
+The script uses `mkvpropedit` to modify chapters and tags directly in the file without remuxing. This makes chapter embedding nearly instantaneous regardless of file size:
+
+| File Size | Time |
+|-----------|------|
+| 1 GB | < 1 second |
+| 10 GB | < 1 second |
+| 50 GB | < 1 second |
+
+When not using `-ReplaceOriginal`, the file is first copied to the output location, then modified in place.
+
 ### Session Caching
+
 Login cookies are cached in `.1001tl-cookies.json` in the script directory. This speeds up consecutive runs by avoiding repeated logins. Cache is valid until cookies expire (~100 days).
 
+### Rate Limit Protection
+
+1001Tracklists.com has rate limits to prevent abuse. The script includes several protections:
+
+- **Automatic delay**: A configurable delay (default: 5 seconds) is added between files in pipeline mode
+- **Detection**: Rate limit responses are detected and reported clearly
+- **Auto-recovery**: When rate limited, the cookie cache is automatically deleted so the next run starts fresh after you solve the captcha
+
+If you encounter a rate limit:
+1. Visit 1001Tracklists.com in your browser
+2. Solve the captcha
+3. Re-run the script (it will create a fresh login session)
+
 ### Duplicate Chapter Detection
-Before muxing, the script extracts existing chapters using `mkvextract` and compares them with the new chapters. If they're identical, the file is skipped with a message:
+
+Before modifying, the script extracts existing chapters using `mkvextract` and compares them with the new chapters. If they're identical **and** the tracklist URL is already stored, the file is skipped:
 ```
 Chapters already exist and are identical - skipping.
 ```
 
+If chapters are identical but no URL is stored yet (e.g., files processed before this feature), the file will be updated to add the URL:
+```
+Chapters identical, but adding tracklist URL to file...
+```
+
+### Tracklist URL Storage
+
+When chapters are added from 1001Tracklists.com, the tracklist URL and title are stored as MKV global tags in the output file. URLs are stored in short format (e.g., `https://www.1001tracklists.com/tracklist/2ft171s9/`).
+
+On subsequent runs:
+
+- **Interactive mode**: Prompts with the stored tracklist info:
+  ```
+  Found stored tracklist:
+    Martin Garrix @ Mainstage, Tomorrowland Weekend 2, Belgium 2025
+    https://www.1001tracklists.com/tracklist/2ft171s9/
+
+    Y = Use this tracklist  |  S = Skip file  |  R = Retry search
+  Use this tracklist? (Y/s/r)
+  ```
+  Press Enter or `Y` to reuse, `S` to skip the file, or `R` to start a new search.
+
+- **AutoSelect mode**: Uses the stored URL directly without searching, significantly speeding up batch re-processing.
+
+Use `-IgnoreStoredUrl` to force a fresh search even when a stored URL exists.
+
 ### Tracklists Without Timestamps
-If a selected tracklist has no timestamps (common for recently added tracklists), you'll be prompted to select a different one in interactive mode. In `-AutoSelect` mode, an error is thrown.
+
+If a selected tracklist has no timestamps (common for recently added tracklists), you'll see:
+```
+VERBOSE: Tracklist analysis: 0 timestamped lines, 22 numbered tracks
+No timestamps available - skipping.
+```
+
+The tracklist exists but users haven't added timestamps yet on 1001Tracklists.com. In interactive mode, you'll be prompted to select a different tracklist. In `-AutoSelect` mode, the file is skipped.
 
 ### Filename to Query Conversion
+
 When using filename-based search, the script:
 1. Removes the file extension
-2. Replaces `-`, `_`, `.` with spaces
-3. Strips YouTube video IDs (11-character codes in brackets at the end)
+2. Removes YouTube video IDs (11-character codes in brackets at the end)
+3. Replaces `-`, `_`, `.` with spaces
 4. Normalizes multiple spaces
 
 ## Troubleshooting
 
-**"Search requires a 1001Tracklists.com account"**
-- Ensure your email and password are correct in config.json
-- Verify your account works on the website
-- Delete `.1001tl-cookies.json` to force a fresh login
-
 **"No tracklists found"**
 - Try a different search query
 - Use `-NoDurationFilter` to see all results regardless of duration
+- Check if the tracklist exists on 1001Tracklists.com
+
+**"Rate limited by 1001Tracklists"**
+- Visit 1001Tracklists.com in your browser and solve the captcha
+- The script automatically deletes the cookie cache when rate limited
+- Re-run the script to create a fresh session
+- Consider increasing `-DelaySeconds` for batch processing
 
 **"This tracklist has no timestamps yet"**
 - Some recent tracklists don't have timestamps added by users yet
@@ -358,7 +459,7 @@ When using filename-based search, the script:
 - The file already has the same chapters - no action needed
 - Use a different tracklist if you want different chapters
 
-**mkvmerge not found**
+**mkvmerge/mkvpropedit not found**
 - Install [MKVToolNix](https://mkvtoolnix.download/)
 - Or specify the path: `-MkvMergePath "C:\Program Files\MKVToolNix\mkvmerge.exe"`
 
@@ -366,3 +467,6 @@ When using filename-based search, the script:
 - Use `-Verbose` to see scoring breakdown
 - Try adding more specific keywords to the filename or `-Tracklist` parameter
 - Include the year, event abbreviation, or weekend/day number for better matching
+
+**Cookie/session errors**
+- Delete `.1001tl-cookies.json` in the script directory to force a fresh login

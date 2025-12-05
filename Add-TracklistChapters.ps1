@@ -10,6 +10,10 @@
     When no tracklist source is specified, the input filename is used as a search query
     on 1001Tracklists.com.
     
+    The selected tracklist URL is stored in the output file's MKV tags. On subsequent runs,
+    this URL is detected and can be reused automatically (in AutoSelect mode) or with
+    confirmation (in interactive mode). Use -IgnoreStoredUrl to force a fresh search.
+    
     Configuration is loaded from config.json in the script directory if present.
     Event aliases for search boosting are loaded from aliases.json if present.
     Command-line parameters override config values.
@@ -50,6 +54,10 @@
 .PARAMETER AutoSelect
     Automatically select the top search result without prompting. Useful for automation and batch processing.
 
+.PARAMETER DelaySeconds
+    Delay in seconds between processing files in a pipeline to avoid rate limiting.
+    Defaults to 5 seconds. Set to 0 to disable delay.
+
 .PARAMETER OutputFile
     Custom output filename. Defaults to original filename with '-new' suffix.
 
@@ -65,8 +73,15 @@
 .PARAMETER Preview
     Parse and display chapters without processing.
 
+.PARAMETER IgnoreStoredUrl
+    Ignore any stored 1001Tracklists URL in the file and perform a fresh search.
+    By default, if a file has a previously stored tracklist URL, it will be used
+    (with confirmation in interactive mode, automatically in AutoSelect mode).
+
 .PARAMETER CreateConfig
-    Generate default config.json and aliases.json files in the script directory and exit.
+    Generate or update config.json and aliases.json files in the script directory.
+    Merges with existing files - your settings (credentials, etc.) are preserved,
+    and any new default properties are added.
 
 .EXAMPLE
     .\Add-TracklistChapters.ps1 -InputFile "2025 - AMF - Sub Zero Project.webm"
@@ -97,7 +112,7 @@
 .EXAMPLE
     .\Add-TracklistChapters.ps1 -CreateConfig
     
-    Creates a default config.json file for storing credentials and preferences.
+    Creates or updates config.json, adding any new settings while preserving existing values.
 
 .EXAMPLE
     .\Add-TracklistChapters.ps1 -InputFile "video.mkv" -Preview
@@ -111,6 +126,17 @@
     Get-ChildItem *.webm | .\Add-TracklistChapters.ps1 -Tracklist "Festival Name 2025"
     
     Batch process all WEBM files using the same search query.
+
+.EXAMPLE
+    .\Add-TracklistChapters.ps1 -InputFile "video.mkv" -IgnoreStoredUrl
+    
+    Force a new search even if the file has a stored tracklist URL from a previous run.
+
+.EXAMPLE
+    .\Add-TracklistChapters.ps1 -InputFile "video.mkv" -AutoSelect -ReplaceOriginal
+    
+    If the file has a stored URL, uses it directly without searching.
+    Otherwise, searches using filename and auto-selects the best match.
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Default')]
@@ -153,6 +179,11 @@ param (
     [Parameter(ParameterSetName = 'Tracklist')]
     [switch]$AutoSelect,
 
+    [Parameter(ParameterSetName = 'Default')]
+    [Parameter(ParameterSetName = 'Tracklist')]
+    [ValidateRange(0, 60)]
+    [int]$DelaySeconds = 5,
+
     [string]$OutputFile,
 
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
@@ -164,6 +195,10 @@ param (
     [switch]$ReplaceOriginal,
 
     [switch]$Preview,
+
+    [Parameter(ParameterSetName = 'Default')]
+    [Parameter(ParameterSetName = 'Tracklist')]
+    [switch]$IgnoreStoredUrl,
 
     [Parameter(Mandatory, ParameterSetName = 'CreateConfig')]
     [switch]$CreateConfig
@@ -192,6 +227,8 @@ begin {
             MkvMergePath     = ''
             ReplaceOriginal  = $false
             NoDurationFilter = $false
+            AutoSelect       = $false
+            DelaySeconds     = 5
         }
     }
 
@@ -310,6 +347,9 @@ begin {
         # Remove extension
         $name = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
 
+        # Remove YouTube video ID at end (yt-dlp format: [xXxXxXxXxXx])
+        $name = $name -replace '\s*\[[A-Za-z0-9_-]{11}\]\s*$', ''
+
         # Replace common separators with spaces
         $name = $name -replace '[-_.]', ' '
 
@@ -352,70 +392,94 @@ begin {
         $defaultConfig = New-DefaultConfig
         $defaultAliases = New-DefaultAliases
 
-        # Handle config.json
-        $writeConfig = $true
+        # Handle config.json - merge with existing if present
+        $finalConfig = [ordered]@{}
+        foreach ($key in $defaultConfig.Keys) { $finalConfig[$key] = $defaultConfig[$key] }
+        $configAction = "Created"
+        
         if (Test-Path $configPath) {
-            Write-Warning "config.json already exists: $configPath"
-            $overwrite = Read-Host "Overwrite? (y/N)"
-            $writeConfig = $overwrite -match '^[Yy]'
+            $existingConfig = Get-Config -Path $configPath
+            if ($existingConfig.Count -gt 0) {
+                # Merge: existing values take precedence over defaults
+                foreach ($key in $existingConfig.Keys) {
+                    $finalConfig[$key] = $existingConfig[$key]
+                }
+                
+                # Check if any new keys were added
+                $newKeys = $defaultConfig.Keys | Where-Object { -not $existingConfig.ContainsKey($_) }
+                if ($newKeys) {
+                    $configAction = "Updated (added: $($newKeys -join ', '))"
+                }
+                else {
+                    $configAction = "Unchanged (already up to date)"
+                }
+            }
         }
 
-        # Handle aliases.json
-        $writeAliases = $true
+        # Handle aliases.json - merge with existing if present
+        $finalAliases = @{}
+        foreach ($key in $defaultAliases.Keys) { $finalAliases[$key] = $defaultAliases[$key] }
+        $aliasesAction = "Created"
+        
         if (Test-Path $aliasesPath) {
-            Write-Warning "aliases.json already exists: $aliasesPath"
-            $overwrite = Read-Host "Overwrite? (y/N)"
-            $writeAliases = $overwrite -match '^[Yy]'
+            $existingAliases = Get-Aliases -Path $aliasesPath
+            if ($existingAliases.Count -gt 0) {
+                # Merge: existing values take precedence over defaults
+                foreach ($key in $existingAliases.Keys) {
+                    $finalAliases[$key] = $existingAliases[$key]
+                }
+                
+                # Check if any new keys were added
+                $newKeys = $defaultAliases.Keys | Where-Object { -not $existingAliases.ContainsKey($_) }
+                if ($newKeys) {
+                    $aliasesAction = "Updated (added: $($newKeys -join ', '))"
+                }
+                else {
+                    $aliasesAction = "Unchanged (already up to date)"
+                }
+            }
         }
 
-        # Write files as needed
-        if ($writeConfig) {
-            Save-Config -Path $configPath -Config $defaultConfig
-        }
-        else {
-            Write-Host "Skipped config.json" -ForegroundColor Yellow
-        }
+        # Write config.json
+        Save-Config -Path $configPath -Config $finalConfig
+        Write-Host "config.json: $configAction" -ForegroundColor $(if ($configAction -eq "Created") { "Green" } elseif ($configAction -match "^Updated") { "Cyan" } else { "DarkGray" })
 
-        if ($writeAliases) {
-            $defaultAliases | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $aliasesPath -Encoding UTF8
-            Write-Host "Aliases saved to: $aliasesPath" -ForegroundColor Green
-        }
-        else {
-            Write-Host "Skipped aliases.json" -ForegroundColor Yellow
-        }
+        # Write aliases.json
+        $finalAliases | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $aliasesPath -Encoding UTF8
+        Write-Host "aliases.json: $aliasesAction" -ForegroundColor $(if ($aliasesAction -eq "Created") { "Green" } elseif ($aliasesAction -match "^Updated") { "Cyan" } else { "DarkGray" })
 
         # Show summary
-        if ($writeConfig) {
-            Write-Host "`nEdit config.json to add your 1001Tracklists.com credentials:" -ForegroundColor Cyan
-            Write-Host $configPath
-        }
-        if ($writeAliases) {
-            Write-Host "`nEdit aliases.json to add custom event abbreviations:" -ForegroundColor Cyan
-            Write-Host $aliasesPath
-        }
+        Write-Host "`nConfig location: $configPath" -ForegroundColor DarkGray
+        Write-Host "Aliases location: $aliasesPath" -ForegroundColor DarkGray
         return
     }
 
     # Load config and apply defaults (command-line parameters override config)
     $config = Get-Config -Path $configPath
 
-    if (-not $PSBoundParameters.ContainsKey('Email') -and $config.Email) {
+    if (-not $PSBoundParameters.ContainsKey('Email') -and $config.ContainsKey('Email') -and $config.Email) {
         $Email = $config.Email
     }
-    if (-not $PSBoundParameters.ContainsKey('Password') -and $config.Password) {
+    if (-not $PSBoundParameters.ContainsKey('Password') -and $config.ContainsKey('Password') -and $config.Password) {
         $Password = $config.Password
     }
     if (-not $PSBoundParameters.ContainsKey('ChapterLanguage')) {
-        $ChapterLanguage = if ($config.ChapterLanguage) { $config.ChapterLanguage } else { 'eng' }
+        $ChapterLanguage = if ($config.ContainsKey('ChapterLanguage') -and $config.ChapterLanguage) { $config.ChapterLanguage } else { 'eng' }
     }
-    if (-not $PSBoundParameters.ContainsKey('MkvMergePath') -and $config.MkvMergePath) {
+    if (-not $PSBoundParameters.ContainsKey('MkvMergePath') -and $config.ContainsKey('MkvMergePath') -and $config.MkvMergePath) {
         $MkvMergePath = $config.MkvMergePath
     }
-    if (-not $PSBoundParameters.ContainsKey('ReplaceOriginal') -and $config.ReplaceOriginal) {
+    if (-not $PSBoundParameters.ContainsKey('ReplaceOriginal') -and $config.ContainsKey('ReplaceOriginal') -and $config.ReplaceOriginal) {
         $ReplaceOriginal = [bool]$config.ReplaceOriginal
     }
-    if (-not $PSBoundParameters.ContainsKey('NoDurationFilter') -and $config.NoDurationFilter) {
+    if (-not $PSBoundParameters.ContainsKey('NoDurationFilter') -and $config.ContainsKey('NoDurationFilter') -and $config.NoDurationFilter) {
         $NoDurationFilter = [bool]$config.NoDurationFilter
+    }
+    if (-not $PSBoundParameters.ContainsKey('AutoSelect') -and $config.ContainsKey('AutoSelect') -and $config.AutoSelect) {
+        $AutoSelect = [bool]$config.AutoSelect
+    }
+    if (-not $PSBoundParameters.ContainsKey('DelaySeconds') -and $config.ContainsKey('DelaySeconds')) {
+        $DelaySeconds = [int]$config.DelaySeconds
     }
 
     # Load event aliases for abbreviation matching
@@ -425,6 +489,25 @@ begin {
         $defaultAliases = New-DefaultAliases
         $defaultAliases.Keys | ForEach-Object { $script:EventAliases[$_.ToLower()] = $defaultAliases[$_] }
         Write-Verbose "Using default aliases (no aliases.json found)"
+    }
+
+    # Initialize skip flag
+    $script:SkipAllProcessing = $false
+
+    # Early validation: check credentials if we're going to search 1001Tracklists
+    # This prevents users from going through the entire search flow only to fail at the end
+    $requiresOnlineSearch = -not $TrackListFile -and -not $FromClipboard
+    if ($requiresOnlineSearch -and (-not $Email -or -not $Password)) {
+        Write-Host "Error: " -ForegroundColor Red -NoNewline
+        Write-Host "1001Tracklists.com credentials required."
+        Write-Host ""
+        Write-Host "To set up credentials:" -ForegroundColor Yellow
+        Write-Host "  1. Run: .\Add-TracklistChapters.ps1 -CreateConfig" -ForegroundColor Gray
+        Write-Host "  2. Edit config.json and add your 1001Tracklists.com email and password" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "Alternatively, use -TrackListFile or -FromClipboard for offline chapter sources." -ForegroundColor Gray
+        $script:SkipAllProcessing = $true
+        return
     }
 
     #region 1001Tracklists Configuration
@@ -503,7 +586,12 @@ begin {
             $expired = $false
             foreach ($c in $cacheContent.Cookies) {
                 if ($c.Expires) {
-                    $expiry = [DateTime]::Parse($c.Expires)
+                    # Handle both DateTime objects (auto-converted by ConvertFrom-Json) and strings
+                    $expiry = if ($c.Expires -is [DateTime]) { 
+                        $c.Expires 
+                    } else { 
+                        [DateTime]::Parse($c.Expires, [System.Globalization.CultureInfo]::InvariantCulture) 
+                    }
                     if ($expiry -lt $now) {
                         $expired = $true
                         break
@@ -522,7 +610,12 @@ begin {
             foreach ($c in $cacheContent.Cookies) {
                 $cookie = [System.Net.Cookie]::new($c.Name, $c.Value, $c.Path, $c.Domain)
                 if ($c.Expires) {
-                    $cookie.Expires = [DateTime]::Parse($c.Expires)
+                    # Handle both DateTime objects and strings
+                    $cookie.Expires = if ($c.Expires -is [DateTime]) { 
+                        $c.Expires 
+                    } else { 
+                        [DateTime]::Parse($c.Expires, [System.Globalization.CultureInfo]::InvariantCulture) 
+                    }
                 }
                 $script:Session.Cookies.Add($cookie)
             }
@@ -568,6 +661,16 @@ begin {
             [string]$UserEmail,
             [string]$UserPassword
         )
+
+        # If session already exists and has valid cookies, skip re-initialization
+        if ($script:Session) {
+            $cookies = $script:Session.Cookies.GetCookies($script:BaseUrl)
+            $hasSid = $cookies | Where-Object { $_.Name -eq 'sid' }
+            $hasUid = $cookies | Where-Object { $_.Name -eq 'uid' }
+            if ($hasSid -and $hasUid) {
+                return
+            }
+        }
 
         # Try to restore from cache first
         if ($UserEmail -and $UserPassword) {
@@ -691,10 +794,29 @@ begin {
             return @()
         }
 
+        # Check for rate limiting - use specific text from the rate limit page
+        # The page says "sent too many requests" and "Fill out the captcha to unblock"
+        if ($response.Content -match 'sent too many requests|captcha to unblock') {
+            Write-Warning "Rate limited by 1001Tracklists. Please solve the captcha in your browser, then retry."
+            # Delete cookie cache since the session is now tainted
+            if (Test-Path $script:CookieCachePath) {
+                Remove-Item -LiteralPath $script:CookieCachePath -Force
+                Write-Verbose "Deleted cookie cache due to rate limit."
+            }
+            $script:Session = $null
+            return @()
+        }
+
         $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 
         # Split HTML by bItm class to process each result item
         $items = $response.Content -split 'class="bItm(?:\s|")'
+
+        # Skip if no results (only pre-content exists)
+        if ($items.Count -lt 2) {
+            Write-Verbose "No search results found in response"
+            return @()
+        }
 
         $tracklistPattern = '<a href="(/tracklist/([^/]+)/[^"]+)"[^>]*>([^<]+)</a>'
         # Updated pattern: matches "1h 15m", "58m", or just "1h"
@@ -955,6 +1077,103 @@ begin {
         }
     }
 
+    function Write-HighlightedTitle {
+        <#
+        .SYNOPSIS
+            Writes a title with search term matches highlighted.
+        .DESCRIPTION
+            Highlights matching keywords, abbreviation expansions, alias targets,
+            and event pattern matches (e.g., WE1 -> "Weekend 1") in the title.
+        #>
+        param(
+            [Parameter(Mandatory)]
+            [string]$Title,
+
+            [Parameter(Mandatory)]
+            [hashtable]$QueryParts,
+
+            [string]$HighlightColor = 'White',
+            [string]$NormalColor = 'Gray'
+        )
+
+        # Build list of terms to highlight (case-insensitive)
+        $highlightTerms = [System.Collections.Generic.List[string]]::new()
+
+        # Add keywords (already lowercase)
+        foreach ($kw in $QueryParts.Keywords) {
+            if ($kw.Length -gt 2) {
+                $highlightTerms.Add($kw)
+            }
+        }
+
+        # Add year
+        if ($QueryParts.Year) {
+            $highlightTerms.Add($QueryParts.Year)
+        }
+
+        # Add abbreviations directly (e.g., "AMF" appearing in title)
+        foreach ($abbrev in $QueryParts.Abbreviations) {
+            $highlightTerms.Add($abbrev.ToLower())
+        }
+
+        # Add alias targets (e.g., TML -> Tomorrowland)
+        foreach ($alias in $QueryParts.ResolvedAliases) {
+            $highlightTerms.Add($alias.Target.ToLower())
+        }
+
+        # Add event pattern expansions (e.g., WE1 -> "Weekend 1")
+        foreach ($pattern in $QueryParts.EventPatterns) {
+            if ($pattern.Type -eq 'Weekend') {
+                $highlightTerms.Add("weekend $($pattern.Number)")
+                $highlightTerms.Add("weekend$($pattern.Number)")
+                $highlightTerms.Add("w$($pattern.Number)")
+                $highlightTerms.Add("we$($pattern.Number)")
+            }
+            elseif ($pattern.Type -eq 'Day') {
+                $highlightTerms.Add("day $($pattern.Number)")
+                $highlightTerms.Add("day$($pattern.Number)")
+                $highlightTerms.Add("d$($pattern.Number)")
+            }
+        }
+
+        # Remove duplicates and empty entries
+        $highlightTerms = $highlightTerms | Where-Object { $_ } | Select-Object -Unique
+
+        if ($highlightTerms.Count -eq 0) {
+            Write-Host $Title -ForegroundColor $NormalColor -NoNewline
+            return
+        }
+
+        # Build regex pattern - escape special chars and join with |
+        # Sort by length descending so longer matches are preferred
+        $sortedTerms = $highlightTerms | Sort-Object { $_.Length } -Descending
+        $escapedTerms = $sortedTerms | ForEach-Object { [regex]::Escape($_) }
+        $pattern = '(' + ($escapedTerms -join '|') + ')'
+
+        # Split title by matches, keeping the delimiters
+        $segments = [regex]::Split($Title, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        foreach ($segment in $segments) {
+            if ([string]::IsNullOrEmpty($segment)) { continue }
+
+            # Check if this segment matches any highlight term
+            $isMatch = $false
+            foreach ($term in $highlightTerms) {
+                if ($segment -ieq $term) {
+                    $isMatch = $true
+                    break
+                }
+            }
+
+            if ($isMatch) {
+                Write-Host $segment -ForegroundColor $HighlightColor -NoNewline
+            }
+            else {
+                Write-Host $segment -ForegroundColor $NormalColor -NoNewline
+            }
+        }
+    }
+
     function Get-RelevanceScore {
         <#
         .SYNOPSIS
@@ -1080,8 +1299,29 @@ begin {
             }
         }
 
+        # Pre-calculate event pattern matches (needed for keyword scoring)
+        $matchedEventPatterns = @()
+        if ($QueryParts.EventPatterns.Count -gt 0) {
+            $titleLowerForPatterns = $Result.Title.ToLower()
+            foreach ($pattern in $QueryParts.EventPatterns) {
+                $num = $pattern.Number
+                $type = $pattern.Type
+                
+                if ($type -eq 'Weekend') {
+                    $matchPattern = "(?:weekend\s*$num|w$num|we$num)"
+                }
+                else {
+                    $matchPattern = "(?:day\s*$num|d$num)"
+                }
+                
+                if ($titleLowerForPatterns -match $matchPattern) {
+                    $matchedEventPatterns += $pattern
+                }
+            }
+        }
+
         # Keyword score (important - identifies the correct event/artist)
-        # Matched abbreviations and aliases count as matched keywords
+        # Matched abbreviations, aliases, and event patterns count as matched keywords
         $kwScore = 0
         if ($QueryParts.Keywords.Count -gt 0) {
             $titleNormalized = (Remove-Diacritics $Result.Title).ToLower()
@@ -1106,6 +1346,14 @@ begin {
                 elseif ($matchedAliases | Where-Object { $_.Alias.ToLower() -eq $keywordNormalized }) {
                     $matchedCount++
                     $matchedKws += "$keyword(alias)"
+                }
+                # Check if keyword matches an event pattern that was found in the title
+                elseif ($matchedEventPatterns | Where-Object {
+                    ($_.Type -eq 'Weekend' -and $keywordNormalized -match "^(?:we|w|weekend)$($_.Number)$") -or
+                    ($_.Type -eq 'Day' -and $keywordNormalized -match "^(?:d|day)$($_.Number)$")
+                }) {
+                    $matchedCount++
+                    $matchedKws += "$keyword(pat)"
                 }
             }
             
@@ -1178,7 +1426,7 @@ begin {
         return @{
             Score               = $finalScore
             MatchedKeywordCount = $matchedCount
-            HasEventMatch       = ($matchedAbbreviations.Count -gt 0) -or ($matchedAliases.Count -gt 0)
+            HasEventMatch       = ($matchedAbbreviations.Count -gt 0) -or ($matchedAliases.Count -gt 0) -or ($matchedEventPatterns.Count -gt 0)
         }
     }
 
@@ -1236,126 +1484,6 @@ begin {
         return $json.data
     }
 
-    function Get-1001TracklistFromHtml {
-        [CmdletBinding()]
-        param(
-            [Parameter(Mandatory)]
-            [string]$Id,
-
-            [string]$FullUrl
-        )
-
-        Write-Verbose "Parsing tracklist from HTML: $Id"
-
-        $initialUrl = if ($FullUrl) { $FullUrl } else { "$script:BaseUrl/tracklist/$Id/" }
-        $response = Invoke-1001Request -Uri $initialUrl
-        $html = $response.Content
-
-        $titleMatch = [regex]::Match($html, '<title>([^<]+)</title>')
-        $title = if ($titleMatch.Success) {
-            [System.Web.HttpUtility]::HtmlDecode($titleMatch.Groups[1].Value.Trim())
-        }
-        else {
-            "Unknown Tracklist"
-        }
-
-        $tracks = [System.Collections.Generic.List[PSCustomObject]]::new()
-        
-        # Parse the cueValueData JavaScript to get timestamps in seconds
-        # Format: cueValuesEntry.seconds = 12; cueValuesEntry.number = '1';
-        $cueData = @{}
-        $cueMatches = [regex]::Matches($html, "cueValuesEntry\.seconds\s*=\s*(\d+);\s*cueValuesEntry\.number\s*=\s*'(\d+)'")
-        foreach ($match in $cueMatches) {
-            $seconds = [int]$match.Groups[1].Value
-            $number = $match.Groups[2].Value
-            $cueData[$number] = $seconds
-        }
-        
-        # Parse track items - look for tlpItem divs with track number and meta itemprop="name"
-        # Pattern: div with class containing "tlpItem" and data-trno, then find meta itemprop="name"
-        $trackPattern = '<div[^>]+class="[^"]*tlpItem[^"]*"[^>]+data-trno="(\d+)"[^>]*>[\s\S]*?<meta\s+itemprop="name"\s+content="([^"]+)"'
-        $trackMatches = [regex]::Matches($html, $trackPattern)
-        
-        foreach ($match in $trackMatches) {
-            $trNo = $match.Groups[1].Value
-            $trackName = [System.Web.HttpUtility]::HtmlDecode($match.Groups[2].Value.Trim())
-            
-            # Skip "w/" (played with) entries - they share timestamp with previous track
-            # Look for the tracknumber_value span to check if it's a "w/" entry
-            $itemSection = $match.Value
-            if ($itemSection -match 'title="played together with previous track"') {
-                continue
-            }
-            
-            # Get timestamp from cue data
-            $timestamp = ''
-            if ($cueData.ContainsKey(($tracks.Count + 1).ToString())) {
-                $seconds = $cueData[($tracks.Count + 1).ToString()]
-                $hours = [math]::Floor($seconds / 3600)
-                $mins = [math]::Floor(($seconds % 3600) / 60)
-                $secs = $seconds % 60
-                if ($hours -gt 0) {
-                    $timestamp = "{0}:{1:D2}:{2:D2}" -f $hours, $mins, $secs
-                } else {
-                    $timestamp = "{0}:{1:D2}" -f $mins, $secs
-                }
-            }
-            
-            if (-not [string]::IsNullOrWhiteSpace($trackName)) {
-                $tracks.Add([PSCustomObject]@{
-                    Position  = $tracks.Count + 1
-                    Timestamp = $timestamp
-                    Track     = $trackName
-                })
-            }
-        }
-
-        # Fallback: If the above didn't work, try a simpler approach using cue divs
-        if ($tracks.Count -eq 0) {
-            Write-Verbose "Primary parsing failed, trying fallback method..."
-            
-            # Find all meta itemprop="name" tags paired with cue timestamps
-            $sections = $html -split '<div[^>]+class="[^"]*tlpItem'
-            $trackNumber = 0
-            
-            foreach ($section in $sections[1..($sections.Count - 1)]) {
-                # Skip mashup sub-positions (linked tracks)
-                if ($section -match 'data-mashpos="true"') {
-                    continue
-                }
-                
-                # Skip "w/" entries
-                if ($section -match 'title="played together with previous track"') {
-                    continue
-                }
-                
-                # Get track name from meta itemprop="name"
-                $nameMatch = [regex]::Match($section, '<meta\s+itemprop="name"\s+content="([^"]+)"')
-                if (-not $nameMatch.Success) { continue }
-                
-                $trackName = [System.Web.HttpUtility]::HtmlDecode($nameMatch.Groups[1].Value.Trim())
-                
-                # Get timestamp from cue div (format: >00:12< or >05:22<)
-                $cueMatch = [regex]::Match($section, '<div[^>]+class="cue[^"]*"[^>]*>(\d{1,2}:\d{2}(?::\d{2})?)</div>')
-                $timestamp = if ($cueMatch.Success) { $cueMatch.Groups[1].Value } else { '' }
-                
-                if (-not [string]::IsNullOrWhiteSpace($trackName) -and -not [string]::IsNullOrWhiteSpace($timestamp)) {
-                    $trackNumber++
-                    $tracks.Add([PSCustomObject]@{
-                        Position  = $trackNumber
-                        Timestamp = $timestamp
-                        Track     = $trackName
-                    })
-                }
-            }
-        }
-
-        return [PSCustomObject]@{
-            Title  = $title
-            Tracks = $tracks
-        }
-    }
-
     function Select-1001SearchResult {
         [CmdletBinding()]
         param(
@@ -1364,6 +1492,8 @@ begin {
             [PSCustomObject[]]$Results,
 
             [int]$VideoDurationMinutes = 0,
+
+            [string]$SearchQuery,
 
             [switch]$AutoSelect
         )
@@ -1410,7 +1540,16 @@ begin {
         $displayResults = $Results | Select-Object -First 15
         $maxIndex = $displayResults.Count
         
+        # Parse query for highlighting
+        $queryParts = if ($SearchQuery) { Get-QueryParts -Query $SearchQuery } else { $null }
+        
         Write-Host ""
+        if ($SearchQuery) {
+            # Clean YouTube ID for display (same regex as in Get-QueryParts)
+            $displayQuery = $SearchQuery -replace '\s*\[[A-Za-z0-9_-]{11}\]\s*$', ''
+            Write-Host "Searched for: " -ForegroundColor DarkGray -NoNewline
+            Write-Host $displayQuery -ForegroundColor White
+        }
         $headerText = "Search Results"
         if ($VideoDurationMinutes -gt 0) {
             $headerText += " (video: ${VideoDurationMinutes}m)"
@@ -1434,8 +1573,13 @@ begin {
             # Index
             Write-Host ("{0,3}. " -f $result.Index) -ForegroundColor Cyan -NoNewline
 
-            # Title
-            Write-Host $result.Title -NoNewline
+            # Title with keyword highlighting
+            if ($queryParts) {
+                Write-HighlightedTitle -Title $result.Title -QueryParts $queryParts
+            }
+            else {
+                Write-Host $result.Title -ForegroundColor Gray -NoNewline
+            }
 
             # Metadata bracket
             if ($result.Date -or $result.DurationMins) {
@@ -1558,10 +1702,10 @@ begin {
             $results = Search-1001Tracklists -Query $SearchQuery -DurationMinutes $VideoDurationMinutes -Year $queryYear
 
             if (-not $results -or $results.Count -eq 0) {
-                throw "No tracklists found for query: $SearchQuery`nNote: Search requires a 1001Tracklists.com account. Use -Email and -Password to authenticate."
+                throw "No tracklists found for query: $SearchQuery"
             }
 
-            $selected = Select-1001SearchResult -Results $results -VideoDurationMinutes $VideoDurationMinutes -AutoSelect:$AutoSelect
+            $selected = Select-1001SearchResult -Results $results -VideoDurationMinutes $VideoDurationMinutes -SearchQuery $SearchQuery -AutoSelect:$AutoSelect
             if (-not $selected) {
                 return $null  # User cancelled
             }
@@ -1575,50 +1719,31 @@ begin {
         }
         elseif ($Id) {
             $targetId = $Id
+            $targetUrl = "$script:BaseUrl/tracklist/$Id/"
         }
 
         # Fetch the tracklist
         Write-Host "Fetching tracklist..." -ForegroundColor Cyan
 
-        $tracklistData = $null
-        $useExport = $UserEmail -and $UserPassword
-
-        if ($useExport) {
-            try {
-                $tracklistData = Get-1001TracklistExport -Id $targetId -FullUrl $targetUrl
-            }
-            catch {
-                Write-Warning "Export API failed: $_"
-                Write-Warning "Falling back to HTML parsing..."
-                $useExport = $false
-            }
+        # Export API requires authentication
+        if (-not ($UserEmail -and $UserPassword)) {
+            throw "Export API requires authentication. Use -Email and -Password or configure credentials in config.json."
         }
 
-        if (-not $useExport) {
-            $parsed = Get-1001TracklistFromHtml -Id $targetId -FullUrl $targetUrl
+        $tracklistData = Get-1001TracklistExport -Id $targetId -FullUrl $targetUrl
+        # Extract title from first non-empty line
+        $dataLines = $tracklistData -split "`r?`n"
+        $tracklistTitle = ($dataLines | Where-Object { $_.Trim() } | Select-Object -First 1)
 
-            $lines = [System.Collections.Generic.List[string]]::new()
-            $lines.Add($parsed.Title)
-            $lines.Add("")
+        # Normalize URL to short format (just ID, no slug)
+        $shortUrl = "$script:BaseUrl/tracklist/$targetId/"
 
-            foreach ($track in $parsed.Tracks) {
-                $line = if ($track.Timestamp) {
-                    "[$($track.Timestamp)] $($track.Track)"
-                }
-                else {
-                    $track.Track
-                }
-                $lines.Add($line)
-            }
-
-            $lines.Add("")
-            $lines.Add("https://1001.tl/$targetId")
-
-            $tracklistData = $lines -join "`r`n"
+        # Return as object with Lines, Url, and Title
+        return [PSCustomObject]@{
+            Lines = $tracklistData -split "`r?`n"
+            Url   = $shortUrl
+            Title = $tracklistTitle
         }
-
-        # Return as lines array
-        return $tracklistData -split "`r?`n"
     }
 
     #endregion 1001Tracklists Functions
@@ -1740,6 +1865,120 @@ begin {
         }
     }
 
+    function Get-StoredTracklistInfo {
+        <#
+        .SYNOPSIS
+            Extracts stored 1001Tracklists URL and title from MKV/WEBM file tags.
+        .DESCRIPTION
+            Uses mkvextract to extract tags and looks for 1001TRACKLISTS_URL and
+            1001TRACKLISTS_TITLE tags at the global level.
+        .OUTPUTS
+            Returns a hashtable with Url and Title properties, or $null if not found.
+        #>
+        param(
+            [Parameter(Mandatory)]
+            [string]$Path,
+
+            [Parameter(Mandatory)]
+            [string]$MkvMergePath
+        )
+
+        # mkvextract should be in the same directory as mkvmerge
+        $mkvExtractPath = Join-Path (Split-Path $MkvMergePath -Parent) 'mkvextract.exe'
+        
+        if (-not (Test-Path $mkvExtractPath)) {
+            Write-Verbose "mkvextract not found, cannot check for stored tracklist URL"
+            return $null
+        }
+
+        # Extract tags to a temp file
+        $tempTagsFile = Join-Path ([System.IO.Path]::GetTempPath()) "tags_extract_$([guid]::NewGuid().ToString('N')).xml"
+        
+        try {
+            $null = & $mkvExtractPath $Path tags $tempTagsFile 2>&1
+            
+            if (-not (Test-Path $tempTagsFile)) {
+                return $null
+            }
+            
+            $fileSize = (Get-Item $tempTagsFile).Length
+            if ($fileSize -eq 0) {
+                return $null
+            }
+
+            # Parse the XML
+            $xmlContent = Get-Content -LiteralPath $tempTagsFile -Raw
+            [xml]$xml = $xmlContent
+            
+            if (-not $xml.Tags) {
+                return $null
+            }
+
+            # Get Tag elements - handle both single and multiple
+            $tagElements = @($xml.Tags.SelectNodes('Tag'))
+            if ($tagElements.Count -eq 0) {
+                return $null
+            }
+
+            # Look for global tags (TargetTypeValue = 70 or no Targets element means global)
+            $url = $null
+            $title = $null
+
+            foreach ($tag in $tagElements) {
+                # Check if this is a global tag (no Targets or TargetTypeValue >= 70)
+                $isGlobal = $true
+                $targetsNode = $tag.SelectSingleNode('Targets')
+                if ($targetsNode) {
+                    $targetTypeNode = $targetsNode.SelectSingleNode('TargetTypeValue')
+                    if ($targetTypeNode -and $targetTypeNode.InnerText) {
+                        $targetType = [int]$targetTypeNode.InnerText
+                        $isGlobal = $targetType -ge 70
+                    }
+                }
+
+                if (-not $isGlobal) { continue }
+
+                # Look for our custom tags in the Simple elements
+                $simpleNodes = @($tag.SelectNodes('Simple'))
+                foreach ($simple in $simpleNodes) {
+                    $nameNode = $simple.SelectSingleNode('Name')
+                    $stringNode = $simple.SelectSingleNode('String')
+                    
+                    if (-not $nameNode -or -not $stringNode) { continue }
+                    
+                    $tagName = $nameNode.InnerText
+                    $tagValue = $stringNode.InnerText
+                    
+                    if ($tagName -eq '1001TRACKLISTS_URL') {
+                        $url = $tagValue
+                    }
+                    elseif ($tagName -eq '1001TRACKLISTS_TITLE') {
+                        $title = $tagValue
+                    }
+                }
+            }
+
+            if ($url) {
+                Write-Verbose "Found stored tracklist: $title"
+                return @{
+                    Url   = $url
+                    Title = $title
+                }
+            }
+
+            return $null
+        }
+        catch {
+            Write-Verbose "Failed to read stored tracklist info: $_"
+            return $null
+        }
+        finally {
+            if (Test-Path $tempTagsFile) {
+                Remove-Item -LiteralPath $tempTagsFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
     function Compare-Chapters {
         <#
         .SYNOPSIS
@@ -1795,7 +2034,7 @@ begin {
         .SYNOPSIS
             Normalizes timestamps to hh:mm:ss.mmm format.
         .PARAMETER Time
-            Timestamp in mm:ss, hh:mm:ss, or hh:mm:ss.mmm format.
+            Timestamp in mm:ss, m:ss, hh:mm:ss, or hh:mm:ss.mmm format.
         #>
         param (
             [Parameter(Mandatory)]
@@ -1811,17 +2050,25 @@ begin {
         $parts = $Time -split ':'
 
         switch ($parts.Count) {
-            2 { $normalized = "00:$Time" }
-            3 { $normalized = $Time }
+            2 {
+                # mm:ss or m:ss format - pad each part and prepend hours
+                $mins = $parts[0].PadLeft(2, '0')
+                $secs = $parts[1].PadLeft(2, '0')
+                $normalized = "00:$mins`:$secs"
+            }
+            3 {
+                # hh:mm:ss format - pad each part
+                $hours = $parts[0].PadLeft(2, '0')
+                $mins = $parts[1].PadLeft(2, '0')
+                $secs = $parts[2].PadLeft(2, '0')
+                $normalized = "$hours`:$mins`:$secs"
+            }
             default { throw "Invalid timestamp format: $Time" }
         }
 
-        if ($normalized -notmatch '^(\d{1,2}):([0-5]\d):([0-5]\d)$') {
+        if ($normalized -notmatch '^(\d{2}):([0-5]\d):([0-5]\d)$') {
             throw "Invalid timestamp: $normalized"
         }
-
-        $components = $normalized -split ':'
-        $normalized = '{0:D2}:{1}:{2}' -f [int]$components[0], $components[1], $components[2]
 
         return "$normalized.$milliseconds"
     }
@@ -1945,45 +2192,114 @@ begin {
         return $xmlDoc
     }
 
-    function Invoke-MkvMerge {
+    function ConvertTo-TagsXml {
         <#
         .SYNOPSIS
-            Executes mkvmerge to embed chapters.
+            Creates a Matroska tags XML document with 1001Tracklists metadata.
+        .DESCRIPTION
+            Creates a global tag containing the tracklist URL and title for embedding
+            in the MKV file using mkvmerge --global-tags.
         #>
         param (
             [Parameter(Mandatory)]
-            [string]$MkvMergePath,
+            [string]$TracklistUrl,
 
-            [Parameter(Mandatory)]
-            [string]$InputFile,
-
-            [Parameter(Mandatory)]
-            [string]$OutputFile,
-
-            [Parameter(Mandatory)]
-            [string]$ChapterXmlPath
+            [string]$TracklistTitle
         )
+
+        $xmlDoc = [System.Xml.XmlDocument]::new()
+        $declaration = $xmlDoc.CreateXmlDeclaration('1.0', 'UTF-8', $null)
+        [void]$xmlDoc.AppendChild($declaration)
+
+        $tagsElement = $xmlDoc.CreateElement('Tags')
+        [void]$xmlDoc.AppendChild($tagsElement)
+
+        $tagElement = $xmlDoc.CreateElement('Tag')
+        [void]$tagsElement.AppendChild($tagElement)
+
+        # Create Targets element for global scope (TargetTypeValue 70 = COLLECTION)
+        $targetsElement = $xmlDoc.CreateElement('Targets')
+        $targetTypeValue = $xmlDoc.CreateElement('TargetTypeValue')
+        $targetTypeValue.InnerText = '70'
+        [void]$targetsElement.AppendChild($targetTypeValue)
+        [void]$tagElement.AppendChild($targetsElement)
+
+        # Add URL tag
+        $simpleUrl = $xmlDoc.CreateElement('Simple')
+        $nameUrl = $xmlDoc.CreateElement('Name')
+        $nameUrl.InnerText = '1001TRACKLISTS_URL'
+        [void]$simpleUrl.AppendChild($nameUrl)
+        $stringUrl = $xmlDoc.CreateElement('String')
+        $stringUrl.InnerText = $TracklistUrl
+        [void]$simpleUrl.AppendChild($stringUrl)
+        [void]$tagElement.AppendChild($simpleUrl)
+
+        # Add Title tag if provided
+        if ($TracklistTitle) {
+            $simpleTitle = $xmlDoc.CreateElement('Simple')
+            $nameTitle = $xmlDoc.CreateElement('Name')
+            $nameTitle.InnerText = '1001TRACKLISTS_TITLE'
+            [void]$simpleTitle.AppendChild($nameTitle)
+            $stringTitle = $xmlDoc.CreateElement('String')
+            $stringTitle.InnerText = $TracklistTitle
+            [void]$simpleTitle.AppendChild($stringTitle)
+            [void]$tagElement.AppendChild($simpleTitle)
+        }
+
+        return $xmlDoc
+    }
+
+    function Invoke-MkvPropedit {
+        <#
+        .SYNOPSIS
+            Executes mkvpropedit to embed chapters and optionally tags in-place.
+        .DESCRIPTION
+            Uses mkvpropedit for fast in-place metadata modification instead of
+            full remuxing with mkvmerge. This is nearly instantaneous regardless
+            of file size since only metadata sections are modified.
+        #>
+        param (
+            [Parameter(Mandatory)]
+            [string]$MkvToolNixPath,
+
+            [Parameter(Mandatory)]
+            [string]$TargetFile,
+
+            [Parameter(Mandatory)]
+            [string]$ChapterXmlPath,
+
+            [string]$TagsXmlPath
+        )
+
+        $mkvPropeditPath = Join-Path (Split-Path $MkvToolNixPath -Parent) 'mkvpropedit.exe'
+        
+        if (-not (Test-Path $mkvPropeditPath)) {
+            throw "mkvpropedit.exe not found at: $mkvPropeditPath"
+        }
 
         $arguments = @(
-            '-o', $OutputFile
-            '--no-chapters'
+            $TargetFile
             '--chapters', $ChapterXmlPath
-            $InputFile
         )
 
+        # Add tags if provided
+        if ($TagsXmlPath) {
+            $arguments += '--tags', "global:$TagsXmlPath"
+        }
+
         # Capture output and only display with -Verbose
-        $output = & $MkvMergePath @arguments 2>&1
+        $output = & $mkvPropeditPath @arguments 2>&1
 
         foreach ($line in $output) {
             Write-Verbose $line
         }
 
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) {
+        if ($LASTEXITCODE -ne 0) {
             # On error, show output regardless of verbose setting
             foreach ($line in $output) {
                 Write-Host $line -ForegroundColor Red
             }
-            throw "mkvmerge failed with exit code $LASTEXITCODE"
+            throw "mkvpropedit failed with exit code $LASTEXITCODE"
         }
     }
 
@@ -1992,7 +2308,7 @@ begin {
     # Resolve items that only need to happen once
     if (-not $MkvMergePath) {
         $MkvMergePath = Find-MkvMerge
-        Write-Verbose "Using mkvmerge: $MkvMergePath"
+        Write-Verbose "Using MKVToolNix: $(Split-Path $MkvMergePath -Parent)"
     }
 
     # Resolve credentials for 1001Tracklists
@@ -2015,42 +2331,111 @@ begin {
 
     # Track processed files for summary
     $script:processedCount = 0
+    $script:addedCount = 0
+    $script:upToDateCount = 0
+    $script:skippedCount = 0
     $script:errorCount = 0
 }
 
 process {
+    # Skip if early validation failed (e.g., missing credentials)
+    if ($script:SkipAllProcessing) {
+        return
+    }
+
     # Skip if CreateConfig was handled
     if ($PSCmdlet.ParameterSetName -eq 'CreateConfig') {
         return
     }
 
+    # Add delay between files to avoid rate limiting (skip first file)
+    if ($script:processedCount -gt 0 -and $DelaySeconds -gt 0) {
+        Write-Host "Waiting $DelaySeconds seconds..." -ForegroundColor DarkGray
+        Start-Sleep -Seconds $DelaySeconds
+    }
+    $script:processedCount++
+
     try {
         $currentFile = $InputFile
-        Write-Host "`n Processing: $(Split-Path $currentFile -Leaf)" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host ("=" * 80) -ForegroundColor DarkGray
+        Write-Host " Processing: $(Split-Path $currentFile -Leaf)" -ForegroundColor Cyan
+
+        # Track tracklist metadata for embedding in output file
+        $script:tracklistUrl = $null
+        $script:tracklistTitle = $null
+
+        # Check for stored tracklist URL (only for Default and Tracklist parameter sets)
+        $storedInfo = $null
+        $useStoredUrl = $false
+        
+        if (-not $IgnoreStoredUrl -and ($PSCmdlet.ParameterSetName -eq 'Default' -or $PSCmdlet.ParameterSetName -eq 'Tracklist')) {
+            $resolvedPath = Resolve-Path -LiteralPath $currentFile | Select-Object -ExpandProperty Path
+            $storedInfo = Get-StoredTracklistInfo -Path $resolvedPath -MkvMergePath $MkvMergePath
+            
+            if ($storedInfo) {
+                $displayTitle = if ($storedInfo.Title) { $storedInfo.Title } else { $storedInfo.Url }
+                
+                if ($AutoSelect) {
+                    # In AutoSelect mode, use stored URL directly
+                    Write-Host "Using stored tracklist: $displayTitle" -ForegroundColor Green
+                    $useStoredUrl = $true
+                }
+                else {
+                    # In interactive mode, prompt user
+                    Write-Host "`nFound stored tracklist:" -ForegroundColor Cyan
+                    Write-Host "  $displayTitle" -ForegroundColor Yellow
+                    Write-Host "  $($storedInfo.Url)" -ForegroundColor DarkGray
+                    Write-Host ""
+                    Write-Host "  Y = Use this tracklist  |  S = Skip file  |  R = Retry search" -ForegroundColor DarkGray
+                    
+                    $response = Read-Host "Use this tracklist? (Y/s/r)"
+                    if ($response -match '^[Ss]') {
+                        Write-Host "Skipping file." -ForegroundColor Yellow
+                        $script:skippedCount++
+                        return
+                    }
+                    elseif ($response -match '^[Rr]') {
+                        Write-Host "Starting new search..." -ForegroundColor Cyan
+                        # Reset storedInfo since user wants fresh search
+                        $storedInfo = $null
+                        # Continue with normal search flow
+                    }
+                    else {
+                        # Default to Yes
+                        $useStoredUrl = $true
+                    }
+                }
+            }
+        }
 
         # Determine tracklist source and type
         $tracklistSource = $null
 
-        switch ($PSCmdlet.ParameterSetName) {
-            'Default' {
-                # Search from filename
-                $searchQuery = ConvertTo-SearchQuery -FileName (Split-Path $currentFile -Leaf)
-                $tracklistSource = @{ Type = 'Search'; Value = $searchQuery }
-                Write-Host "Searching for: $searchQuery" -ForegroundColor Cyan
-            }
+        # If using stored URL, set tracklistSource to use it directly
+        if ($useStoredUrl) {
+            $tracklistSource = @{ Type = 'Url'; Value = $storedInfo.Url }
+            $script:tracklistUrl = $storedInfo.Url
+            $script:tracklistTitle = $storedInfo.Title
+        }
+        else {
+            switch ($PSCmdlet.ParameterSetName) {
+                'Default' {
+                    # Search from filename
+                    $searchQuery = ConvertTo-SearchQuery -FileName (Split-Path $currentFile -Leaf)
+                    $tracklistSource = @{ Type = 'Search'; Value = $searchQuery }
+                }
 
-            'Tracklist' {
-                # Auto-detect type from -Tracklist parameter
-                $tracklistSource = Get-TracklistType -TracklistInput $Tracklist
-                
-                if ($tracklistSource.Type -eq 'Search') {
-                    Write-Host "Searching for: $($tracklistSource.Value)" -ForegroundColor Cyan
-                }
-                elseif ($tracklistSource.Type -eq 'Url') {
-                    Write-Verbose "Fetching from URL: $($tracklistSource.Value)"
-                }
-                else {
-                    Write-Verbose "Fetching by ID: $($tracklistSource.Value)"
+                'Tracklist' {
+                    # Auto-detect type from -Tracklist parameter
+                    $tracklistSource = Get-TracklistType -TracklistInput $Tracklist
+                    
+                    if ($tracklistSource.Type -eq 'Url') {
+                        Write-Verbose "Fetching from URL: $($tracklistSource.Value)"
+                    }
+                    elseif ($tracklistSource.Type -eq 'Id') {
+                        Write-Verbose "Fetching by ID: $($tracklistSource.Value)"
+                    }
                 }
             }
         }
@@ -2072,41 +2457,69 @@ process {
         while ($retrySelection) {
             $retrySelection = $false
             
-            $trackLines = switch ($PSCmdlet.ParameterSetName) {
+            # Helper to process 1001Tracklists result and extract lines/metadata
+            $tracklistResult = $null
+            
+            switch ($PSCmdlet.ParameterSetName) {
                 'Default' {
-                    $lines = Get-1001TracklistLines -SearchQuery $tracklistSource.Value -UserEmail $resolvedEmail -UserPassword $resolvedPassword -VideoDurationMinutes $videoDurationMinutes -AutoSelect:$AutoSelect
-                    if (-not $lines) {
+                    if ($tracklistSource.Type -eq 'Url') {
+                        # Using stored URL
+                        $tracklistResult = Get-1001TracklistLines -Url $tracklistSource.Value -UserEmail $resolvedEmail -UserPassword $resolvedPassword
+                    }
+                    else {
+                        # Search from filename
+                        $tracklistResult = Get-1001TracklistLines -SearchQuery $tracklistSource.Value -UserEmail $resolvedEmail -UserPassword $resolvedPassword -VideoDurationMinutes $videoDurationMinutes -AutoSelect:$AutoSelect
+                    }
+                    
+                    if (-not $tracklistResult) {
                         Write-Host "Cancelled." -ForegroundColor Yellow
+                        $script:skippedCount++
                         return
                     }
-                    $lines
+                    
+                    $trackLines = $tracklistResult.Lines
+                    if (-not $script:tracklistUrl -and $tracklistResult.Url) {
+                        $script:tracklistUrl = $tracklistResult.Url
+                        $script:tracklistTitle = $tracklistResult.Title
+                    }
                 }
 
                 'Tracklist' {
                     switch ($tracklistSource.Type) {
                         'Search' {
-                            $lines = Get-1001TracklistLines -SearchQuery $tracklistSource.Value -UserEmail $resolvedEmail -UserPassword $resolvedPassword -VideoDurationMinutes $videoDurationMinutes -AutoSelect:$AutoSelect
-                            if (-not $lines) {
+                            $tracklistResult = Get-1001TracklistLines -SearchQuery $tracklistSource.Value -UserEmail $resolvedEmail -UserPassword $resolvedPassword -VideoDurationMinutes $videoDurationMinutes -AutoSelect:$AutoSelect
+                            if (-not $tracklistResult) {
                                 Write-Host "Cancelled." -ForegroundColor Yellow
+                                $script:skippedCount++
                                 return
                             }
-                            $lines
+                            $trackLines = $tracklistResult.Lines
+                            $script:tracklistUrl = $tracklistResult.Url
+                            $script:tracklistTitle = $tracklistResult.Title
                         }
                         'Url' {
-                            Get-1001TracklistLines -Url $tracklistSource.Value -UserEmail $resolvedEmail -UserPassword $resolvedPassword
+                            $tracklistResult = Get-1001TracklistLines -Url $tracklistSource.Value -UserEmail $resolvedEmail -UserPassword $resolvedPassword
+                            $trackLines = $tracklistResult.Lines
+                            if (-not $script:tracklistUrl) {
+                                $script:tracklistUrl = $tracklistResult.Url
+                                $script:tracklistTitle = $tracklistResult.Title
+                            }
                         }
                         'Id' {
-                            Get-1001TracklistLines -Id $tracklistSource.Value -UserEmail $resolvedEmail -UserPassword $resolvedPassword
+                            $tracklistResult = Get-1001TracklistLines -Id $tracklistSource.Value -UserEmail $resolvedEmail -UserPassword $resolvedPassword
+                            $trackLines = $tracklistResult.Lines
+                            $script:tracklistUrl = $tracklistResult.Url
+                            $script:tracklistTitle = $tracklistResult.Title
                         }
                     }
                 }
 
                 'File' {
-                    $sharedTrackLines
+                    $trackLines = $sharedTrackLines
                 }
 
                 'Clipboard' {
-                    $sharedTrackLines
+                    $trackLines = $sharedTrackLines
                 }
             }
 
@@ -2114,25 +2527,51 @@ process {
             $timestampPattern = '^\s*\[([0-9:.]+)\]\s*(.+?)\s*$'
             $filteredLines = @($trackLines | Where-Object { $_ -match $timestampPattern })
 
-            if ($filteredLines.Count -eq 0) {
-                # Check if we have numbered tracks without timestamps (common for incomplete tracklists)
-                $numberedPattern = '^\s*\d{1,3}\.\s+.+'
-                $hasNumberedTracks = $trackLines | Where-Object { $_ -match $numberedPattern }
+            # Check for incomplete tracklists
+            $numberedPattern = '^\s*\d{1,3}\.\s+.+'
+            $numberedTracks = @($trackLines | Where-Object { $_ -match $numberedPattern })
+            
+            Write-Verbose "Tracklist analysis: $($filteredLines.Count) timestamped lines, $($numberedTracks.Count) numbered tracks"
 
-                if ($hasNumberedTracks) {
+            if ($filteredLines.Count -eq 0) {
+                if ($numberedTracks.Count -gt 0) {
                     $noTimestampMsg = "This tracklist has no timestamps yet. Timestamps are added by users on 1001Tracklists.com."
                     
-                    # In interactive search mode, allow re-selection
-                    $isInteractiveSearch = -not $AutoSelect -and ($PSCmdlet.ParameterSetName -eq 'Default' -or ($PSCmdlet.ParameterSetName -eq 'Tracklist' -and $tracklistSource.Type -eq 'Search'))
-                    
-                    if ($isInteractiveSearch) {
-                        Write-Host "$noTimestampMsg" -ForegroundColor Yellow
-                        Write-Host "Please select a different tracklist.`n" -ForegroundColor Yellow
-                        $retrySelection = $true
-                        continue
+                    if ($AutoSelect) {
+                        # AutoSelect mode: skip gracefully and continue with next file
+                        Write-Host "No timestamps available - skipping." -ForegroundColor Yellow
+                        $script:skippedCount++
+                        return
                     }
                     else {
-                        throw "$noTimestampMsg Please wait until timestamps are added or use a different tracklist."
+                        # Interactive mode: offer skip or new search
+                        Write-Host "$noTimestampMsg" -ForegroundColor Yellow
+                        Write-Host ""
+                        Write-Host "  R = Retry search  |  S = Skip file" -ForegroundColor DarkGray
+                        $retryResponse = Read-Host "Retry or skip? (R/s)"
+                        
+                        if ($retryResponse -match '^[Ss]') {
+                            Write-Host "Skipping file." -ForegroundColor Yellow
+                            $script:skippedCount++
+                            return
+                        }
+                        
+                        # Switch to search mode for retry - build search query from filename
+                        $searchQuery = ConvertTo-SearchQuery -FileName (Split-Path $currentFile -Leaf)
+                        $tracklistSource = @{ Type = 'Search'; Value = $searchQuery }
+                        $script:tracklistUrl = $null
+                        $script:tracklistTitle = $null
+                        
+                        # Calculate video duration if not already done (needed for search filtering)
+                        if ($videoDurationMinutes -eq 0 -and -not $NoDurationFilter) {
+                            $videoDurationMinutes = Get-VideoDurationMinutes -Path $currentFile -MkvMergePath $MkvMergePath
+                            if ($videoDurationMinutes) {
+                                Write-Verbose "Video duration: $videoDurationMinutes minutes"
+                            }
+                        }
+                        
+                        $retrySelection = $true
+                        continue
                     }
                 }
 
@@ -2157,7 +2596,6 @@ process {
                 'Timestamp'
                 'Title'
             ) -AutoSize
-            $script:processedCount++
             return
         }
 
@@ -2166,52 +2604,84 @@ process {
 
         # Check if existing chapters are the same as new chapters
         $existingChapters = Get-ExistingChapters -Path $resolvedInputFile -MkvMergePath $MkvMergePath
-        if (Compare-Chapters -ExistingChapters $existingChapters -NewChapters $chapters) {
+        $chaptersIdentical = Compare-Chapters -ExistingChapters $existingChapters -NewChapters $chapters
+        
+        # Skip only if chapters are identical AND URL is already stored
+        if ($chaptersIdentical -and $storedInfo) {
             Write-Host "Chapters already exist and are identical - skipping." -ForegroundColor Yellow
-            $script:processedCount++
+            $script:upToDateCount++
             return
         }
+        
+        # If chapters are identical but URL not stored, we still need to update to add the URL
+        if ($chaptersIdentical -and $script:tracklistUrl) {
+            Write-Host "Chapters identical, but adding tracklist URL to file..." -ForegroundColor Cyan
+        }
 
+        # Determine the target file for mkvpropedit
+        # mkvpropedit modifies files in-place, so for non-replace mode we copy first
         if ($ReplaceOriginal) {
-            $finalOutputFile = $resolvedInputFile
-            $tempOutputFile = [System.IO.Path]::ChangeExtension($resolvedInputFile, '.tmp' + [System.IO.Path]::GetExtension($resolvedInputFile))
+            $targetFile = $resolvedInputFile
         }
         elseif ($OutputFile) {
-            $finalOutputFile = $OutputFile
-            $tempOutputFile = $OutputFile
+            $targetFile = $OutputFile
+            Write-Host "Copying file..." -ForegroundColor Cyan
+            Copy-Item -LiteralPath $resolvedInputFile -Destination $targetFile -Force
         }
         else {
             $extension = [System.IO.Path]::GetExtension($resolvedInputFile)
             $baseName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedInputFile)
             $directory = [System.IO.Path]::GetDirectoryName($resolvedInputFile)
-            $finalOutputFile = Join-Path $directory "$baseName-new$extension"
-            $tempOutputFile = $finalOutputFile
+            $targetFile = Join-Path $directory "$baseName-new$extension"
+            Write-Host "Copying file..." -ForegroundColor Cyan
+            Copy-Item -LiteralPath $resolvedInputFile -Destination $targetFile -Force
         }
 
         # Generate chapter XML
         $xmlDoc = ConvertTo-ChapterXml -Chapters $chapters
         $xmlFile = Join-Path ([System.IO.Path]::GetTempPath()) "mkv_chapters_$([guid]::NewGuid().ToString('N')).xml"
 
+        # Generate tags XML if we have a tracklist URL
+        $tagsXmlFile = $null
+        if ($script:tracklistUrl) {
+            $tagsXmlDoc = ConvertTo-TagsXml -TracklistUrl $script:tracklistUrl -TracklistTitle $script:tracklistTitle
+            $tagsXmlFile = Join-Path ([System.IO.Path]::GetTempPath()) "mkv_tags_$([guid]::NewGuid().ToString('N')).xml"
+            $tagsXmlDoc.Save($tagsXmlFile)
+            Write-Verbose "Tags XML saved to: $tagsXmlFile"
+        }
+
         try {
             $xmlDoc.Save($xmlFile)
             Write-Verbose "Chapter XML saved to: $xmlFile"
 
-            # Run mkvmerge
-            Write-Host "Muxing chapters..." -ForegroundColor Cyan
-            Invoke-MkvMerge -MkvMergePath $MkvMergePath -InputFile $resolvedInputFile -OutputFile $tempOutputFile -ChapterXmlPath $xmlFile
-
-            # Handle replace original
-            if ($ReplaceOriginal) {
-                Remove-Item -LiteralPath $resolvedInputFile -Force
-                Move-Item -LiteralPath $tempOutputFile -Destination $resolvedInputFile -Force
+            # Run mkvpropedit (fast in-place modification)
+            Write-Host "Adding chapters..." -ForegroundColor Cyan
+            $editParams = @{
+                MkvToolNixPath = $MkvMergePath
+                TargetFile     = $targetFile
+                ChapterXmlPath = $xmlFile
             }
+            if ($tagsXmlFile) {
+                $editParams.TagsXmlPath = $tagsXmlFile
+            }
+            Invoke-MkvPropedit @editParams
 
-            Write-Host "Chapters added successfully: $finalOutputFile" -ForegroundColor Green
-            $script:processedCount++
+            Write-Host "Chapters added successfully: $targetFile" -ForegroundColor Green
+            $script:addedCount++
+        }
+        catch {
+            # If we copied the file and failed, clean up the copy
+            if (-not $ReplaceOriginal -and (Test-Path $targetFile)) {
+                Remove-Item -LiteralPath $targetFile -Force -ErrorAction SilentlyContinue
+            }
+            throw
         }
         finally {
             if (Test-Path $xmlFile) {
                 Remove-Item -LiteralPath $xmlFile -Force
+            }
+            if ($tagsXmlFile -and (Test-Path $tagsXmlFile)) {
+                Remove-Item -LiteralPath $tagsXmlFile -Force
             }
         }
     }
@@ -2222,22 +2692,29 @@ process {
 }
 
 end {
-    # Skip if CreateConfig was handled or no files processed
-    if ($PSCmdlet.ParameterSetName -eq 'CreateConfig') {
+    # Skip if early validation failed or CreateConfig was handled
+    if ($script:SkipAllProcessing -or $PSCmdlet.ParameterSetName -eq 'CreateConfig') {
         return
     }
 
     # Show summary if multiple files were processed
-    if ($script:processedCount + $script:errorCount -gt 1) {
+    $totalFiles = $script:addedCount + $script:upToDateCount + $script:skippedCount + $script:errorCount
+    if ($totalFiles -gt 1) {
         Write-Host "`n" -NoNewline
         Write-Host ("-" * 50) -ForegroundColor DarkGray
-        Write-Host "Summary: " -ForegroundColor Cyan -NoNewline
-        Write-Host "$($script:processedCount) succeeded" -ForegroundColor Green -NoNewline
-        if ($script:errorCount -gt 0) {
-            Write-Host ", $($script:errorCount) failed" -ForegroundColor Red
+        Write-Host "Summary: $totalFiles files processed" -ForegroundColor Cyan
+        
+        if ($script:addedCount -gt 0) {
+            Write-Host "  $($script:addedCount) chapters added" -ForegroundColor Green
         }
-        else {
-            Write-Host ""
+        if ($script:upToDateCount -gt 0) {
+            Write-Host "  $($script:upToDateCount) already up-to-date" -ForegroundColor DarkGray
+        }
+        if ($script:skippedCount -gt 0) {
+            Write-Host "  $($script:skippedCount) skipped" -ForegroundColor Yellow
+        }
+        if ($script:errorCount -gt 0) {
+            Write-Host "  $($script:errorCount) failed" -ForegroundColor Red
         }
     }
 }
