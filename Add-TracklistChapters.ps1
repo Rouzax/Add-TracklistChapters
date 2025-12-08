@@ -2252,11 +2252,13 @@ begin {
     function Invoke-MkvPropedit {
         <#
         .SYNOPSIS
-            Executes mkvpropedit to embed chapters and optionally tags in-place.
+            Executes mkvpropedit to embed chapters and/or tags in-place.
         .DESCRIPTION
             Uses mkvpropedit for fast in-place metadata modification instead of
             full remuxing with mkvmerge. This is nearly instantaneous regardless
             of file size since only metadata sections are modified.
+            
+            At least one of ChapterXmlPath or TagsXmlPath must be provided.
         #>
         param (
             [Parameter(Mandatory)]
@@ -2265,11 +2267,14 @@ begin {
             [Parameter(Mandatory)]
             [string]$TargetFile,
 
-            [Parameter(Mandatory)]
             [string]$ChapterXmlPath,
 
             [string]$TagsXmlPath
         )
+
+        if (-not $ChapterXmlPath -and -not $TagsXmlPath) {
+            throw "At least one of ChapterXmlPath or TagsXmlPath must be provided"
+        }
 
         $mkvPropeditPath = Join-Path (Split-Path $MkvToolNixPath -Parent) 'mkvpropedit.exe'
         
@@ -2277,10 +2282,12 @@ begin {
             throw "mkvpropedit.exe not found at: $mkvPropeditPath"
         }
 
-        $arguments = @(
-            $TargetFile
-            '--chapters', $ChapterXmlPath
-        )
+        $arguments = @($TargetFile)
+        
+        # Add chapters if provided
+        if ($ChapterXmlPath) {
+            $arguments += '--chapters', $ChapterXmlPath
+        }
 
         # Add tags if provided
         if ($TagsXmlPath) {
@@ -2333,6 +2340,7 @@ begin {
     $script:processedCount = 0
     $script:addedCount = 0
     $script:upToDateCount = 0
+    $script:taggedCount = 0
     $script:skippedCount = 0
     $script:errorCount = 0
 }
@@ -2534,45 +2542,115 @@ process {
             Write-Verbose "Tracklist analysis: $($filteredLines.Count) timestamped lines, $($numberedTracks.Count) numbered tracks"
 
             if ($filteredLines.Count -eq 0) {
-                if ($numberedTracks.Count -gt 0) {
-                    $noTimestampMsg = "This tracklist has no timestamps yet. Timestamps are added by users on 1001Tracklists.com."
+                if ($numberedTracks.Count -gt 0 -and $script:tracklistUrl) {
+                    # Tracklist exists but no timestamps yet - and we have a URL to tag with
                     
-                    if ($AutoSelect) {
-                        # AutoSelect mode: skip gracefully and continue with next file
-                        Write-Host "No timestamps available - skipping." -ForegroundColor Yellow
+                    # Check if this file is already tagged with this URL (no point re-tagging)
+                    $alreadyTagged = $storedInfo -and $storedInfo.Url -eq $script:tracklistUrl
+                    
+                    if ($alreadyTagged) {
+                        Write-Host "Already tagged, awaiting community timestamps." -ForegroundColor Yellow
                         $script:skippedCount++
                         return
                     }
+                    
+                    $noTimestampMsg = "This tracklist has no timestamps yet. Timestamps are added by users on 1001Tracklists.com."
+                    
+                    if ($AutoSelect) {
+                        # AutoSelect mode: tag with URL for future pickup
+                        Write-Host "No timestamps yet - tagging for future pickup." -ForegroundColor Yellow
+                    }
                     else {
-                        # Interactive mode: offer skip or new search
+                        # Interactive mode: offer tag, retry, or skip
                         Write-Host "$noTimestampMsg" -ForegroundColor Yellow
                         Write-Host ""
-                        Write-Host "  R = Retry search  |  S = Skip file" -ForegroundColor DarkGray
-                        $retryResponse = Read-Host "Retry or skip? (R/s)"
+                        Write-Host "  T = Tag only (check again later)  |  R = Retry search  |  S = Skip" -ForegroundColor DarkGray
+                        $tagResponse = Read-Host "Action? (T/r/s)"
                         
-                        if ($retryResponse -match '^[Ss]') {
+                        if ($tagResponse -match '^[Ss]') {
                             Write-Host "Skipping file." -ForegroundColor Yellow
                             $script:skippedCount++
                             return
                         }
-                        
-                        # Switch to search mode for retry - build search query from filename
-                        $searchQuery = ConvertTo-SearchQuery -FileName (Split-Path $currentFile -Leaf)
-                        $tracklistSource = @{ Type = 'Search'; Value = $searchQuery }
-                        $script:tracklistUrl = $null
-                        $script:tracklistTitle = $null
-                        
-                        # Calculate video duration if not already done (needed for search filtering)
-                        if ($videoDurationMinutes -eq 0 -and -not $NoDurationFilter) {
-                            $videoDurationMinutes = Get-VideoDurationMinutes -Path $currentFile -MkvMergePath $MkvMergePath
-                            if ($videoDurationMinutes) {
-                                Write-Verbose "Video duration: $videoDurationMinutes minutes"
+                        elseif ($tagResponse -match '^[Rr]') {
+                            # Switch to search mode for retry - build search query from filename
+                            $searchQuery = ConvertTo-SearchQuery -FileName (Split-Path $currentFile -Leaf)
+                            $tracklistSource = @{ Type = 'Search'; Value = $searchQuery }
+                            $script:tracklistUrl = $null
+                            $script:tracklistTitle = $null
+                            
+                            # Calculate video duration if not already done (needed for search filtering)
+                            if ($videoDurationMinutes -eq 0 -and -not $NoDurationFilter) {
+                                $videoDurationMinutes = Get-VideoDurationMinutes -Path $currentFile -MkvMergePath $MkvMergePath
+                                if ($videoDurationMinutes) {
+                                    Write-Verbose "Video duration: $videoDurationMinutes minutes"
+                                }
                             }
+                            
+                            $retrySelection = $true
+                            continue
                         }
-                        
-                        $retrySelection = $true
-                        continue
+                        # Default (T or Enter): fall through to tag-only logic below
                     }
+                    
+                    # Tag-only mode: write URL/title without chapters
+                    if ($Preview) {
+                        Write-Host "`nWould tag with:" -ForegroundColor Green
+                        Write-Host "  URL: $($script:tracklistUrl)" -ForegroundColor Cyan
+                        if ($script:tracklistTitle) {
+                            Write-Host "  Title: $($script:tracklistTitle)" -ForegroundColor Cyan
+                        }
+                        return
+                    }
+                    
+                    # Determine target file for tagging
+                    $resolvedInputFile = Resolve-Path -LiteralPath $currentFile | Select-Object -ExpandProperty Path
+                    
+                    if ($ReplaceOriginal) {
+                        $targetFile = $resolvedInputFile
+                    }
+                    elseif ($OutputFile) {
+                        $targetFile = $OutputFile
+                        Write-Host "Copying file..." -ForegroundColor Cyan
+                        Copy-Item -LiteralPath $resolvedInputFile -Destination $targetFile -Force
+                    }
+                    else {
+                        $extension = [System.IO.Path]::GetExtension($resolvedInputFile)
+                        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedInputFile)
+                        $directory = [System.IO.Path]::GetDirectoryName($resolvedInputFile)
+                        $targetFile = Join-Path $directory "$baseName-new$extension"
+                        Write-Host "Copying file..." -ForegroundColor Cyan
+                        Copy-Item -LiteralPath $resolvedInputFile -Destination $targetFile -Force
+                    }
+                    
+                    # Generate and write tags XML
+                    $tagsXmlDoc = ConvertTo-TagsXml -TracklistUrl $script:tracklistUrl -TracklistTitle $script:tracklistTitle
+                    $tagsXmlFile = Join-Path ([System.IO.Path]::GetTempPath()) "mkv_tags_$([guid]::NewGuid().ToString('N')).xml"
+                    
+                    try {
+                        $tagsXmlDoc.Save($tagsXmlFile)
+                        Write-Verbose "Tags XML saved to: $tagsXmlFile"
+                        
+                        Write-Host "Tagging file..." -ForegroundColor Cyan
+                        Invoke-MkvPropedit -MkvToolNixPath $MkvMergePath -TargetFile $targetFile -TagsXmlPath $tagsXmlFile
+                        
+                        Write-Host "Tagged for future timestamp pickup: $targetFile" -ForegroundColor Green
+                        $script:taggedCount++
+                    }
+                    catch {
+                        # If we copied the file and failed, clean up the copy
+                        if (-not $ReplaceOriginal -and (Test-Path $targetFile)) {
+                            Remove-Item -LiteralPath $targetFile -Force -ErrorAction SilentlyContinue
+                        }
+                        throw
+                    }
+                    finally {
+                        if (Test-Path $tagsXmlFile) {
+                            Remove-Item -LiteralPath $tagsXmlFile -Force
+                        }
+                    }
+                    
+                    return
                 }
 
                 throw 'No valid tracklist entries found. Expected format: [mm:ss] Title or [hh:mm:ss] Title'
@@ -2698,7 +2776,7 @@ end {
     }
 
     # Show summary if multiple files were processed
-    $totalFiles = $script:addedCount + $script:upToDateCount + $script:skippedCount + $script:errorCount
+    $totalFiles = $script:addedCount + $script:upToDateCount + $script:taggedCount + $script:skippedCount + $script:errorCount
     if ($totalFiles -gt 1) {
         Write-Host "`n" -NoNewline
         Write-Host ("-" * 50) -ForegroundColor DarkGray
@@ -2709,6 +2787,9 @@ end {
         }
         if ($script:upToDateCount -gt 0) {
             Write-Host "  $($script:upToDateCount) already up-to-date" -ForegroundColor DarkGray
+        }
+        if ($script:taggedCount -gt 0) {
+            Write-Host "  $($script:taggedCount) tagged (awaiting timestamps)" -ForegroundColor Yellow
         }
         if ($script:skippedCount -gt 0) {
             Write-Host "  $($script:skippedCount) skipped" -ForegroundColor Yellow
