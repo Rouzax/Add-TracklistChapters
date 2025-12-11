@@ -2637,9 +2637,9 @@ process {
             $trackLines = $filteredLines
         }
 
-        $chapters = foreach ($line in $trackLines) {
+        $chapters = @(foreach ($line in $trackLines) {
             ConvertTo-Chapter -Line $line -Language $ChapterLanguage
-        }
+        })
 
         Write-Verbose "Parsed $($chapters.Count) chapters"
 
