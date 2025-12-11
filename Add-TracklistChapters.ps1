@@ -501,11 +501,11 @@ begin {
         Write-Host "Error: " -ForegroundColor Red -NoNewline
         Write-Host "1001Tracklists.com credentials required."
         Write-Host ""
-        Write-Host "To set up credentials:" -ForegroundColor Yellow
-        Write-Host "  1. Run: .\Add-TracklistChapters.ps1 -CreateConfig" -ForegroundColor Gray
-        Write-Host "  2. Edit config.json and add your 1001Tracklists.com email and password" -ForegroundColor Gray
+        Write-Host "To set up credentials:" -ForegroundColor Cyan
+        Write-Host "  1. Run: .\Add-TracklistChapters.ps1 -CreateConfig" -ForegroundColor DarkGray
+        Write-Host "  2. Edit config.json and add your 1001Tracklists.com email and password" -ForegroundColor DarkGray
         Write-Host ""
-        Write-Host "Alternatively, use -TrackListFile or -FromClipboard for offline chapter sources." -ForegroundColor Gray
+        Write-Host "Alternatively, use -TrackListFile or -FromClipboard for offline chapter sources." -ForegroundColor DarkGray
         $script:SkipAllProcessing = $true
         return
     }
@@ -1584,7 +1584,7 @@ begin {
             } else {
                 Write-Host "Auto-selected: " -ForegroundColor Cyan -NoNewline
             }
-            Write-Host "$($selected.Title)$metaStr" -ForegroundColor Green
+            Write-Host "$($selected.Title)$metaStr" -ForegroundColor White
             Write-Host ""
             
             return $selected
@@ -1643,7 +1643,7 @@ begin {
                 # Date with emoji
                 if ($result.Date) {
                     Write-Host "📅 " -NoNewline
-                    Write-Host $result.Date -ForegroundColor Yellow -NoNewline
+                    Write-Host $result.Date -ForegroundColor White -NoNewline
                 }
 
                 # Separator
@@ -2414,7 +2414,8 @@ process {
         $currentFile = $InputFile
         Write-Host ""
         Write-Host ("=" * 80) -ForegroundColor DarkGray
-        Write-Host "Processing: $(Split-Path $currentFile -Leaf)" -ForegroundColor Cyan
+        Write-Host "Processing: " -ForegroundColor Cyan -NoNewline
+        Write-Host (Split-Path $currentFile -Leaf) -ForegroundColor White
 
         # Track tracklist metadata for embedding in output file
         $script:tracklistUrl = $null
@@ -2440,7 +2441,7 @@ process {
                 else {
                     # In interactive mode, prompt user
                     Write-Host "`nFound stored tracklist:" -ForegroundColor Cyan
-                    Write-Host "  $displayTitle" -ForegroundColor Yellow
+                    Write-Host "  $displayTitle" -ForegroundColor White
                     Write-Host "  $($storedInfo.Url)" -ForegroundColor DarkGray
                     Write-Host ""
                     Write-Host "  Y = Use this tracklist  |  S = Skip file  |  R = Retry search" -ForegroundColor DarkGray
@@ -2645,7 +2646,7 @@ process {
 
         # Preview mode
         if ($Preview) {
-            Write-Host "`nParsed Chapters:" -ForegroundColor Green
+            Write-Host "`nParsed Chapters:" -ForegroundColor Cyan
             $script:i = 0
             $chapters | Format-Table -Property @(
                 @{ Label = '#'; Expression = { $script:i++; $script:i } }
