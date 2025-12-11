@@ -17,6 +17,7 @@ Navigate DJ sets, live recordings, and music mixes track by track.
 - 🍪 **Session Caching** - Login cookies cached for ~100 days for faster consecutive runs
 - 🔄 **Duplicate Detection** - Skips files that already have identical chapters
 - 🔗 **URL Storage** - Stores tracklist URL in file for instant reuse on subsequent runs
+- 🕐 **Future Timestamp Pickup** - Tags files with tracklist URL even when timestamps aren't available yet
 - 📦 **Pipeline Support** - Batch process multiple files via PowerShell pipeline
 - ⏭️ **Auto-Select Mode** - Fully automated chapter embedding for batch processing
 - 🛡️ **Rate Limit Protection** - Configurable delay between requests to avoid 1001Tracklists rate limits
@@ -149,9 +150,10 @@ A summary is displayed after batch processing:
 
 ```
 --------------------------------------------------
-Summary: 10 files processed
+Summary: 12 files processed
   7 chapters added
   2 already up-to-date
+  2 tagged (awaiting timestamps)
   1 skipped
 ```
 
@@ -422,13 +424,31 @@ Use `-IgnoreStoredUrl` to force a fresh search even when a stored URL exists.
 
 ### Tracklists Without Timestamps
 
-If a selected tracklist has no timestamps (common for recently added tracklists), you'll see:
+Some tracklists on 1001Tracklists.com don't have timestamps yet - timestamps are added by the community over time. When you select a tracklist without timestamps, the script stores the tracklist URL in the file so it can automatically pick up the timestamps on a future run.
+
+**Interactive mode** prompts for action:
 ```
-VERBOSE: Tracklist analysis: 0 timestamped lines, 22 numbered tracks
-No timestamps available - skipping.
+This tracklist has no timestamps yet. Timestamps are added by users on 1001Tracklists.com.
+
+  T = Tag only (check again later)  |  R = Retry search  |  S = Skip
+Action? (T/r/s)
+```
+Press Enter or `T` to tag the file for future pickup, `R` to search for a different tracklist, or `S` to skip.
+
+**AutoSelect mode** automatically tags the file:
+```
+No timestamps yet - tagging for future pickup.
+Tagging file...
+Tagged for future timestamp pickup: video.mkv
 ```
 
-The tracklist exists but users haven't added timestamps yet on 1001Tracklists.com. In interactive mode, you'll be prompted to select a different tracklist. In `-AutoSelect` mode, the file is skipped.
+**On subsequent runs**, if the tracklist now has timestamps, chapters are added automatically. If timestamps are still unavailable:
+```
+Already tagged, awaiting community timestamps.
+```
+The file is skipped since it's already tagged with the same URL.
+
+This workflow allows you to batch-process files immediately when tracklists are published, then re-run later to pick up timestamps as the community adds them.
 
 ### Filename to Query Conversion
 
@@ -452,8 +472,15 @@ When using filename-based search, the script:
 - Consider increasing `-DelaySeconds` for batch processing
 
 **"This tracklist has no timestamps yet"**
-- Some recent tracklists don't have timestamps added by users yet
-- Select a different tracklist or wait for the community to add timestamps
+- The tracklist exists but timestamps haven't been added by users yet
+- Choose `T` to tag the file now and re-run later when timestamps are available
+- Or choose `R` to search for a different tracklist that has timestamps
+- In `-AutoSelect` mode, files are automatically tagged for future pickup
+
+**"Already tagged, awaiting community timestamps"**
+- The file was previously tagged with a tracklist URL that still has no timestamps
+- Re-run the script later when the community has added timestamps
+- Use `-IgnoreStoredUrl` to search for a different tracklist
 
 **"Chapters already exist and are identical - skipping"**
 - The file already has the same chapters - no action needed
