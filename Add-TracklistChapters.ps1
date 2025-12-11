@@ -2414,7 +2414,7 @@ process {
         $currentFile = $InputFile
         Write-Host ""
         Write-Host ("=" * 80) -ForegroundColor DarkGray
-        Write-Host " Processing: $(Split-Path $currentFile -Leaf)" -ForegroundColor Cyan
+        Write-Host "Processing: $(Split-Path $currentFile -Leaf)" -ForegroundColor Cyan
 
         # Track tracklist metadata for embedding in output file
         $script:tracklistUrl = $null
