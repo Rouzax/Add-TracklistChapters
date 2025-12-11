@@ -622,7 +622,13 @@ begin {
 
             # Validate cookies by making a test request to profile page
             Write-Verbose "Validating cached cookies..."
-            $testResponse = Invoke-WebRequest -Uri "$script:BaseUrl/my/" -WebSession $script:Session -UseBasicParsing -MaximumRedirection 20
+            $testParams = @{
+                Uri                = "$script:BaseUrl/my/"
+                WebSession         = $script:Session
+                UseBasicParsing    = $true
+                MaximumRedirection = 20
+            }
+            $testResponse = Invoke-WebRequestWithRetry -Parameters $testParams
 
             # Check if response indicates we're logged in (page contains logout link or profile content)
             # If redirected to login or content indicates not logged in, cookies are invalid
@@ -684,7 +690,13 @@ begin {
         $script:Session.UserAgent = $script:UserAgent
 
         Write-Verbose "Initializing 1001Tracklists session..."
-        $null = Invoke-WebRequest -Uri $script:BaseUrl -WebSession $script:Session -UseBasicParsing -MaximumRedirection 20
+        $initParams = @{
+            Uri                = $script:BaseUrl
+            WebSession         = $script:Session
+            UseBasicParsing    = $true
+            MaximumRedirection = 20
+        }
+        $null = Invoke-WebRequestWithRetry -Parameters $initParams
 
         if ($UserEmail -and $UserPassword) {
             Write-Verbose "Logging in as $UserEmail..."
@@ -704,7 +716,7 @@ begin {
             }
 
             # Login may redirect on success - let it complete, then verify via cookies
-            $null = Invoke-WebRequest @loginParams
+            $null = Invoke-WebRequestWithRetry -Parameters $loginParams
 
             $cookies = $script:Session.Cookies.GetCookies($script:BaseUrl)
             $hasSid = $cookies | Where-Object { $_.Name -eq 'sid' }
@@ -719,6 +731,49 @@ begin {
             # Save cookies for next run
             Save-CookieCache -Email $UserEmail
         }
+    }
+
+    function Invoke-WebRequestWithRetry {
+        <#
+        .SYNOPSIS
+            Wrapper around Invoke-WebRequest with retry logic for transient errors.
+        #>
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)]
+            [hashtable]$Parameters,
+            
+            [int]$MaxRetries = 3
+        )
+        
+        $attempt = 0
+        $lastError = $null
+        
+        while ($attempt -lt $MaxRetries) {
+            $attempt++
+            try {
+                return Invoke-WebRequest @Parameters
+            }
+            catch {
+                $lastError = $_
+                $errorMsg = $_.Exception.Message
+                
+                # Check for transient errors worth retrying
+                $isTransient = $errorMsg -match 'connection was closed|keep alive|timeout|temporarily unavailable|503|502|504'
+                
+                if ($isTransient -and $attempt -lt $MaxRetries) {
+                    $delay = [Math]::Pow(2, $attempt)  # Exponential backoff: 2, 4, 8 seconds
+                    Write-Verbose "Transient error (attempt $attempt/$MaxRetries): $errorMsg"
+                    Write-Verbose "Retrying in $delay seconds..."
+                    Start-Sleep -Seconds $delay
+                }
+                else {
+                    throw
+                }
+            }
+        }
+        
+        throw $lastError
     }
 
     function Invoke-1001Request {
@@ -750,7 +805,7 @@ begin {
         if ($Headers) { $params.Headers = $Headers }
         if ($ContentType) { $params.ContentType = $ContentType }
 
-        Invoke-WebRequest @params
+        Invoke-WebRequestWithRetry -Parameters $params
     }
 
     function Search-1001Tracklists {
