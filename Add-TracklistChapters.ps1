@@ -792,7 +792,7 @@ begin {
                 $errorMsg = $_.Exception.Message
 
                 # Check for transient errors worth retrying
-                $isTransient = $errorMsg -match 'connection was closed|keep alive|timeout|temporarily unavailable|503|502|504|429'
+                $isTransient = $errorMsg -match 'connection was closed|keep alive|timeout|temporarily unavailable|response ended prematurely|ResponseEnded|503|502|504|429'
 
                 if ($isTransient -and $attempt -lt $MaxRetries) {
                     $delay = [Math]::Min([Math]::Pow(2, $attempt) + (Get-Random -Maximum 3), 30)
