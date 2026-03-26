@@ -1614,22 +1614,27 @@ begin {
         # Auto-select mode: pick the first result (highest score)
         if ($AutoSelect) {
             $selected = $Results[0]
-            
-            # Build the display string with duration in minutes
+
+            # Score quality icon
+            $scoreIcon = if ($selected.Score -ge 250) { '✓' }
+                elseif ($selected.Score -ge 150) { '≈' }
+                elseif ($selected.Score -ge 80) { '~' }
+                else { '✗' }
+
+            # Build the display string
             $meta = @()
             if ($selected.Date) { $meta += "📅 $($selected.Date)" }
-            if ($null -ne $selected.DurationMins) { 
-                $durationDisplay = "⏱️ $($selected.DurationMins)m"
+            if ($null -ne $selected.DurationMins) {
+                $durationDisplay = "⏱️ $($selected.Duration)"
                 if ($VideoDurationMinutes -gt 0) {
-                    $diff = [Math]::Abs($selected.DurationMins - $VideoDurationMinutes)
-                    if ($diff -le 1) { $durationDisplay += " ✓" }
-                    elseif ($diff -le 5) { $durationDisplay += " ≈" }
-                    elseif ($diff -le 15) { $durationDisplay += " ~" }
-                    elseif ($diff -gt 30) { $durationDisplay += " ✗" }
+                    $diff = $selected.DurationMins - $VideoDurationMinutes
+                    if ($diff -eq 0) { $durationDisplay += " (±0m)" }
+                    elseif ($diff -gt 0) { $durationDisplay += " (+${diff}m)" }
+                    else { $durationDisplay += " (${diff}m)" }
                 }
                 $meta += $durationDisplay
             }
-            $metaStr = if ($meta.Count -gt 0) { " [{0}]" -f ($meta -join ' | ') } else { "" }
+            $metaStr = if ($meta.Count -gt 0) { " [$scoreIcon {0}]" -f ($meta -join ' | ') } else { "" }
             
             Write-Host ""
             if ($VideoDurationMinutes -gt 0) {
@@ -1666,20 +1671,19 @@ begin {
         Write-Host ("-" * 110) -ForegroundColor DarkGray
 
         foreach ($result in $displayResults) {
-            # Determine match type based on duration difference (matches scoring system)
-            $matchType = 'none'
-            $diff = $null
-            if ($VideoDurationMinutes -gt 0 -and $null -ne $result.DurationMins) {
-                $diff = [Math]::Abs($result.DurationMins - $VideoDurationMinutes)
-                if ($diff -le 1) { $matchType = 'exact' }      # +100 score
-                elseif ($diff -le 5) { $matchType = 'close' }  # +80 score
-                elseif ($diff -le 15) { $matchType = 'moderate' } # +40 score
-                elseif ($diff -le 30) { $matchType = 'far' }   # +10 score
-                else { $matchType = 'bad' }                     # -20 score
-            }
+            # Score quality icon
+            $scoreIcon = if ($result.Score -ge 250) { '✓' }
+                elseif ($result.Score -ge 150) { '≈' }
+                elseif ($result.Score -ge 80) { '~' }
+                else { '✗' }
+            $scoreColor = if ($result.Score -ge 250) { 'Green' }
+                elseif ($result.Score -ge 150) { 'Yellow' }
+                elseif ($result.Score -ge 80) { 'DarkGray' }
+                else { 'DarkRed' }
 
-            # Index
+            # Index with score icon
             Write-Host ("{0,3}. " -f $result.Index) -ForegroundColor Cyan -NoNewline
+            Write-Host "$scoreIcon " -ForegroundColor $scoreColor -NoNewline
 
             # Title with keyword highlighting
             if ($queryParts) {
@@ -1704,34 +1708,16 @@ begin {
                     Write-Host " | " -ForegroundColor DarkGray -NoNewline
                 }
 
-                # Duration in minutes with match indicator
+                # Duration with difference
                 if ($null -ne $result.DurationMins) {
                     Write-Host "⏱️ " -NoNewline
-                    $durationStr = "$($result.DurationMins)m"
-                    
-                    switch ($matchType) {
-                        'exact' {
-                            Write-Host $durationStr -ForegroundColor Green -NoNewline
-                            Write-Host " ✓" -ForegroundColor Green -NoNewline
-                        }
-                        'close' {
-                            Write-Host $durationStr -ForegroundColor Green -NoNewline
-                            Write-Host " ≈" -ForegroundColor Green -NoNewline
-                        }
-                        'moderate' {
-                            Write-Host $durationStr -ForegroundColor DarkYellow -NoNewline
-                            Write-Host " ~" -ForegroundColor DarkYellow -NoNewline
-                        }
-                        'far' {
-                            Write-Host $durationStr -ForegroundColor Gray -NoNewline
-                        }
-                        'bad' {
-                            Write-Host $durationStr -ForegroundColor DarkGray -NoNewline
-                            Write-Host " ✗" -ForegroundColor DarkRed -NoNewline
-                        }
-                        default {
-                            Write-Host $durationStr -ForegroundColor White -NoNewline
-                        }
+                    Write-Host $result.Duration -ForegroundColor White -NoNewline
+                    if ($VideoDurationMinutes -gt 0) {
+                        $diff = $result.DurationMins - $VideoDurationMinutes
+                        $diffStr = if ($diff -eq 0) { ' (±0m)' }
+                            elseif ($diff -gt 0) { " (+${diff}m)" }
+                            else { " (${diff}m)" }
+                        Write-Host $diffStr -ForegroundColor DarkGray -NoNewline
                     }
                 }
 

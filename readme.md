@@ -293,11 +293,11 @@ Score 199.5 for 'Armin van Buuren @ A State of Trance 1000, Utrecht...'
 ```
 Search Results (video: 47m):
 --------------------------------------------------------------------------------------------------------------
-  1. Armin van Buuren & KI/KI @ Two Is One, Amsterdam Music Festival, Netherlands [📅 2025-10-25 | ⏱️ 51m ≈]
-  2. Armin van Buuren - Piano [📅 2025-11-10 | ⏱️ 52m ≈]
-  3. Armin van Buuren @ SLAM! (Amsterdam Dance Event, Netherlands) [📅 2025-10-22 | ⏱️ 51m ≈]
-  4. Armin van Buuren @ Mainstage, Tomorrowland Brasil [📅 2025-10-10 | ⏱️ 58m ~]
-  5. Armin van Buuren @ Amsterdam Music Festival, Netherlands [📅 2025-10-25 | ⏱️ 84m ✗]
+  1. ✓ Armin van Buuren & KI/KI @ Two Is One, Amsterdam Music Festival [📅 2025-10-25 | ⏱️ 51m (+4m)]
+  2. ≈ Armin van Buuren - Piano [📅 2025-11-10 | ⏱️ 52m (+5m)]
+  3. ≈ Armin van Buuren @ SLAM! (Amsterdam Dance Event, Netherlands) [📅 2025-10-22 | ⏱️ 51m (+4m)]
+  4. ~ Armin van Buuren @ Mainstage, Tomorrowland Brasil [📅 2025-10-10 | ⏱️ 58m (+11m)]
+  5. ~ Armin van Buuren @ Amsterdam Music Festival, Netherlands [📅 2025-10-25 | ⏱️ 1h 24m (+37m)]
 --------------------------------------------------------------------------------------------------------------
 ```
 
@@ -305,9 +305,9 @@ Search Results (video: 47m):
 ```
 Search Results (video: 60m):
 --------------------------------------------------------------------------------------------------------------
-  1. Martin Garrix & Alesso @ Red Rocks Amphitheatre, United States [📅 2025-10-24 | ⏱️ 1h ✓]
-  2. Martin Garrix @ Red Rocks Amphitheatre, United States [📅 2025-10-23 | ⏱️ 1h 59m ✗]
-  3. Alesso @ Red Rocks Amphitheatre, United States [📅 2025-10-24 | ⏱️ 1h 2m ≈]
+  1. ✓ Martin Garrix & Alesso @ Red Rocks Amphitheatre, United States [📅 2025-10-24 | ⏱️ 1h (±0m)]
+  2. ≈ Martin Garrix @ Red Rocks Amphitheatre, United States [📅 2025-10-23 | ⏱️ 1h 59m (+59m)]
+  3. ≈ Alesso @ Red Rocks Amphitheatre, United States [📅 2025-10-24 | ⏱️ 1h 2m (+2m)]
 --------------------------------------------------------------------------------------------------------------
 ```
 
@@ -315,9 +315,9 @@ Search Results (video: 60m):
 ```
 Search Results (video: 126m):
 --------------------------------------------------------------------------------------------------------------
-  1. Tiësto @ We Belong Here, Historic Virginia Key Park, United States [📅 2026-03-01 | ⏱️ 3h ✗]
-  2. MOGUAI & Tiësto & MARTEN HØRGER - 1LIVE DJ Session [📅 2026-01-31 | ⏱️ 2h 58m ✗]
-  3. Tiësto @ Dome SVP Stadium, India [📅 2026-01-23 | ⏱️ 2h 19m ~]
+  1. ~ Tiësto @ We Belong Here, Historic Virginia Key Park [📅 2026-03-01 | ⏱️ 3h (+54m)]
+  2. ~ MOGUAI & Tiësto & MARTEN HØRGER - 1LIVE DJ Session [📅 2026-01-31 | ⏱️ 2h 58m (+52m)]
+  3. ~ Tiësto @ Dome SVP Stadium, India [📅 2026-01-23 | ⏱️ 2h 19m (+13m)]
 --------------------------------------------------------------------------------------------------------------
 ```
 
@@ -325,9 +325,9 @@ Search Results (video: 126m):
 ```
 Search Results (video: 89m):
 --------------------------------------------------------------------------------------------------------------
-  1. Oliver Heldens @ Mainstage, Mysteryland, Netherlands [📅 2025-08-23 | ⏱️ 1h 29m ✓]
-  2. Oliver Heldens @ Mainstage, Tomorrowland Weekend 1, Belgium [📅 2025-07-18 | ⏱️ 1h ≈]
-  3. Oliver Heldens @ Orangerie, Tomorrowland Weekend 2, Belgium [📅 2025-07-26 | ⏱️ 1h 58m ✗]
+  1. ✓ Oliver Heldens @ Mainstage, Mysteryland, Netherlands [📅 2025-08-23 | ⏱️ 1h 29m (±0m)]
+  2. ≈ Oliver Heldens @ Mainstage, Tomorrowland Weekend 1, Belgium [📅 2025-07-18 | ⏱️ 1h (-29m)]
+  3. ~ Oliver Heldens @ Orangerie, Tomorrowland Weekend 2, Belgium [📅 2025-07-26 | ⏱️ 1h 58m (+29m)]
 --------------------------------------------------------------------------------------------------------------
 ```
 
@@ -335,18 +335,19 @@ Search Results (video: 89m):
 ```
 Search Results (video: 77m):
 --------------------------------------------------------------------------------------------------------------
-  1. Tiësto @ In Search Of Sunrise, kineticFIELD, EDC Las Vegas, United States [📅 2025-05-18 | ⏱️ 1h 17m ✓]
-  2. Tiësto @ kineticFIELD, EDC Las Vegas, United States [📅 2025-05-17 | ⏱️ 1h 13m ≈]
-  3. GORDO @ bassPOD, EDC Las Vegas, United States [📅 2025-05-16 | ⏱️ 1h 7m ~]
+  1. ✓ Tiësto @ In Search Of Sunrise, kineticFIELD, EDC Las Vegas [📅 2025-05-18 | ⏱️ 1h 17m (±0m)]
+  2. ≈ Tiësto @ kineticFIELD, EDC Las Vegas, United States [📅 2025-05-17 | ⏱️ 1h 13m (-4m)]
+  3. ~ GORDO @ bassPOD, EDC Las Vegas, United States [📅 2025-05-16 | ⏱️ 1h 7m (-10m)]
 --------------------------------------------------------------------------------------------------------------
 ```
 
-**Duration indicators:**
-- ✓ (green) - Exact match (±1 minute)
-- ≈ (yellow) - Close match (±5 minutes)
-- ~ (dim) - Moderate difference (±15 minutes)
-- ✗ (red) - Poor match (>30 minutes difference)
-- No marker - Significant difference (±30 minutes)
+**Result quality indicators** (based on overall relevance score):
+- ✓ (green) - Excellent match (score 250+)
+- ≈ (yellow) - Good match (score 150-250)
+- ~ (dim) - Partial match (score 80-150)
+- ✗ (red) - Poor match (score <80)
+
+Duration difference is shown as `(±0m)`, `(+Xm)`, or `(-Xm)` relative to the video file.
 
 ## Parameters
 
