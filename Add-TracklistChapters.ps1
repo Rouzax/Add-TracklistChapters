@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Adds or replaces chapters in an MKV or WEBM file using mkvmerge.
 
@@ -6,6 +6,9 @@
     Extracts chapter information from a provided tracklist file, clipboard,
     or directly from 1001Tracklists.com, converts it to Matroska XML format, and uses
     mkvmerge to embed chapters in the media file.
+
+.NOTES
+    Version: 2.0.0
     
     When no tracklist source is specified, the input filename is used as a search query
     on 1001Tracklists.com.
@@ -22,8 +25,10 @@
     Cache is valid until the cookies expire (typically ~100 days).
 
 .PARAMETER InputFile
-    The MKV or WEBM file to which chapters will be added. Accepts pipeline input.
-    If no tracklist source is specified, the filename is used as the search query
+    One or more MKV/WEBM files or folders to process. Accepts pipeline input.
+    When a folder is specified, all .mkv and .webm files in it are processed.
+    Use -Recurse to include subfolders.
+    If no tracklist source is specified, each filename is used as the search query
     on 1001Tracklists.com.
 
 .PARAMETER Tracklist
@@ -78,6 +83,10 @@
     By default, if a file has a previously stored tracklist URL, it will be used
     (with confirmation in interactive mode, automatically in AutoSelect mode).
 
+.PARAMETER Recurse
+    When InputFile is a folder, include subfolders when searching for MKV/WEBM files.
+    Without this switch, only files in the top level of the folder are processed.
+
 .PARAMETER CreateConfig
     Generate or update config.json and aliases.json files in the script directory.
     Merges with existing files - your settings (credentials, etc.) are preserved,
@@ -128,26 +137,41 @@
     Batch process all WEBM files using the same search query.
 
 .EXAMPLE
+    .\Add-TracklistChapters.ps1 -InputFile "D:\DJ Sets" -AutoSelect -ReplaceOriginal
+
+    Process all MKV/WEBM files in a folder.
+
+.EXAMPLE
+    .\Add-TracklistChapters.ps1 -InputFile "D:\DJ Sets" -Recurse -AutoSelect -ReplaceOriginal
+
+    Process all MKV/WEBM files in a folder and its subfolders.
+
+.EXAMPLE
+    .\Add-TracklistChapters.ps1 "D:\Ultra", "D:\EDC", "special-set.mkv" -AutoSelect
+
+    Process multiple folders and files in one command.
+
+.EXAMPLE
     .\Add-TracklistChapters.ps1 -InputFile "video.mkv" -IgnoreStoredUrl
-    
+
     Force a new search even if the file has a stored tracklist URL from a previous run.
 
 .EXAMPLE
     .\Add-TracklistChapters.ps1 -InputFile "video.mkv" -AutoSelect -ReplaceOriginal
-    
+
     If the file has a stored URL, uses it directly without searching.
     Otherwise, searches using filename and auto-selects the best match.
 #>
 
-[CmdletBinding(DefaultParameterSetName = 'Default')]
+[CmdletBinding(DefaultParameterSetName = 'Default', SupportsShouldProcess = $true)]
 param (
     [Parameter(Mandatory, ParameterSetName = 'Default', Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
     [Parameter(Mandatory, ParameterSetName = 'Tracklist', Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
     [Parameter(Mandatory, ParameterSetName = 'File', Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
     [Parameter(Mandatory, ParameterSetName = 'Clipboard', Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)]
-    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [ValidateScript({ Test-Path -LiteralPath $_ })]
     [Alias('FullName')]
-    [string]$InputFile,
+    [string[]]$InputFile,
 
     [Parameter(Mandatory, ParameterSetName = 'Tracklist', Position = 1)]
     [string]$Tracklist,
@@ -200,6 +224,8 @@ param (
     [Parameter(ParameterSetName = 'Tracklist')]
     [switch]$IgnoreStoredUrl,
 
+    [switch]$Recurse,
+
     [Parameter(Mandatory, ParameterSetName = 'CreateConfig')]
     [switch]$CreateConfig
 )
@@ -207,6 +233,13 @@ param (
 begin {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
+
+    $script:Version = [version]'2.0.0'
+
+    # Map -Preview to -WhatIf for backward compatibility
+    if ($Preview) {
+        $WhatIfPreference = $true
+    }
 
     # Determine script directory for config and aliases files
     $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
@@ -743,12 +776,12 @@ begin {
             [Parameter(Mandatory)]
             [hashtable]$Parameters,
             
-            [int]$MaxRetries = 3
+            [int]$MaxRetries = 5
         )
-        
+
         $attempt = 0
         $lastError = $null
-        
+
         while ($attempt -lt $MaxRetries) {
             $attempt++
             try {
@@ -757,12 +790,12 @@ begin {
             catch {
                 $lastError = $_
                 $errorMsg = $_.Exception.Message
-                
+
                 # Check for transient errors worth retrying
-                $isTransient = $errorMsg -match 'connection was closed|keep alive|timeout|temporarily unavailable|503|502|504'
-                
+                $isTransient = $errorMsg -match 'connection was closed|keep alive|timeout|temporarily unavailable|503|502|504|429'
+
                 if ($isTransient -and $attempt -lt $MaxRetries) {
-                    $delay = [Math]::Pow(2, $attempt)  # Exponential backoff: 2, 4, 8 seconds
+                    $delay = [Math]::Min([Math]::Pow(2, $attempt) + (Get-Random -Maximum 3), 30)
                     Write-Verbose "Transient error (attempt $attempt/$MaxRetries): $errorMsg"
                     Write-Verbose "Retrying in $delay seconds..."
                     Start-Sleep -Seconds $delay
@@ -849,17 +882,25 @@ begin {
             return @()
         }
 
-        # Check for rate limiting - use specific text from the rate limit page
-        # The page says "sent too many requests" and "Fill out the captcha to unblock"
-        if ($response.Content -match 'sent too many requests|captcha to unblock') {
-            Write-Warning "Rate limited by 1001Tracklists. Please solve the captcha in your browser, then retry."
-            # Delete cookie cache since the session is now tainted
-            if (Test-Path $script:CookieCachePath) {
-                Remove-Item -LiteralPath $script:CookieCachePath -Force
-                Write-Verbose "Deleted cookie cache due to rate limit."
+        # Check for rate limiting via HTTP status code or page content
+        $isRateLimited = $response.StatusCode -eq 429 -or
+            ($response.Content -match 'sent too many requests|captcha to unblock')
+
+        if ($isRateLimited) {
+            # Retry once after waiting
+            $waitSeconds = $DelaySeconds * 6
+            if ($waitSeconds -lt 30) { $waitSeconds = 30 }
+            Write-Warning "Rate limited by 1001Tracklists. Waiting $waitSeconds seconds before retry..."
+            Start-Sleep -Seconds $waitSeconds
+
+            $response = Invoke-1001Request -Uri "$script:BaseUrl/search/result.php" -Method 'POST' -Body $searchBody
+            $isRateLimited = $response.StatusCode -eq 429 -or
+                ($response.Content -match 'sent too many requests|captcha to unblock')
+
+            if ($isRateLimited) {
+                Write-Warning "Still rate limited. Please solve the captcha in your browser, then retry."
+                return @()
             }
-            $script:Session = $null
-            return @()
         }
 
         $results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -987,6 +1028,11 @@ begin {
         # Re-index after sorting
         for ($i = 0; $i -lt $results.Count; $i++) {
             $results[$i].Index = $i + 1
+        }
+
+        # Warn if response had substantial content but nothing was parsed
+        if ($results.Count -eq 0 -and $response.Content.Length -gt 1024) {
+            Write-Warning "Search returned content but no results could be parsed. The site format may have changed."
         }
 
         # Return as array to ensure .Count works even with 0 or 1 result
@@ -1234,18 +1280,20 @@ begin {
         .SYNOPSIS
             Calculates a relevance score for a search result.
         .DESCRIPTION
-            Scoring is designed to find the exact same recording:
-            - Duration match is the strongest signal (same recording = same length)
-            - Event patterns (WE1/Weekend 1) distinguish multi-day events
-            - Keyword/abbreviation matching identifies the correct event
-            - Year matching ensures correct edition of recurring events
-            - Recency is a minor tiebreaker
+            Scoring uses a multiplicative approach where content relevance (keywords,
+            abbreviations, aliases, event patterns) is the primary signal and duration
+            acts as a multiplier that amplifies good matches.
 
-            Score ranges:
-            - Perfect match: ~270 points
-            - Good match: 180-240 points
-            - Partial match: 100-180 points
-            - Poor match: <100 points (may include negative scores for bad duration/pattern mismatch)
+            This prevents duration-only matches from outranking content-relevant results
+            (e.g., a random set with matching duration beating the correct artist/event).
+
+            Components:
+            - Keywords (max 120): proportional to match ratio, bonus for all matched
+            - Abbreviations/Aliases (35 each): event name recognition
+            - Event patterns (±40): WE1/Weekend 1, D1/Day 1 matching
+            - Duration multiplier (0.8x-2.0x): amplifies content score
+            - Year (+25): additive, not multiplied
+            - Recency (0-10): minor tiebreaker
         #>
         param(
             [Parameter(Mandatory)]
@@ -1261,35 +1309,35 @@ begin {
             [double]$DateRange
         )
 
-        $score = 0
+        $contentScore = 0  # Content-based score (keywords, abbreviations, aliases, patterns)
         $breakdown = @()
         $matchedCount = 0
 
-        # Duration score (most important - indicates same recording)
-        # Exact match is strong positive, large mismatch is penalized
-        $durationScore = 0
+        # Duration multiplier - amplifies keyword/content score rather than adding independently
+        # This ensures duration confirms good keyword matches but can't override poor ones
+        $durationMultiplier = 1.0
+        $durationDiff = $null
         if ($VideoDurationMinutes -gt 0 -and $null -ne $Result.DurationMins) {
-            $diff = [Math]::Abs($Result.DurationMins - $VideoDurationMinutes)
-            if ($diff -le 1) {
-                $durationScore = 100  # Exact match - almost certainly the same recording
+            $durationDiff = [Math]::Abs($Result.DurationMins - $VideoDurationMinutes)
+            if ($durationDiff -le 1) {
+                $durationMultiplier = 2.0   # Exact match - almost certainly the same recording
             }
-            elseif ($diff -le 5) {
-                $durationScore = 80   # Close match - likely same recording, minor variance
+            elseif ($durationDiff -le 5) {
+                $durationMultiplier = 1.8   # Close match - likely same recording, minor variance
             }
-            elseif ($diff -le 15) {
-                $durationScore = 40   # Moderate difference - possibly edited/partial recording
+            elseif ($durationDiff -le 15) {
+                $durationMultiplier = 1.4   # Moderate difference - possibly edited/partial recording
             }
-            elseif ($diff -le 30) {
-                $durationScore = 10   # Significant difference - unlikely same recording
+            elseif ($durationDiff -le 30) {
+                $durationMultiplier = 1.1   # Significant difference - unlikely same recording
             }
             else {
-                $durationScore = -20   # Very different duration - penalize
+                $durationMultiplier = 0.8   # Very different duration - reduce score
             }
-            $score += $durationScore
-            $breakdown += "Dur:$durationScore(${diff}m diff)"
+            $breakdown += "Dur:x$durationMultiplier(${durationDiff}m diff)"
         }
         elseif ($VideoDurationMinutes -gt 0 -and $null -eq $Result.DurationMins) {
-            $breakdown += "Dur:0(no data)"
+            $breakdown += "Dur:x1.0(no data)"
         }
 
         # Abbreviation detection (do this first so we can credit keywords)
@@ -1324,7 +1372,7 @@ begin {
                     $matchedAbbreviations += @{ Abbrev = $abbrev; Info = $matchInfo }
                 }
             }
-            $score += $abbrScore
+            $contentScore += $abbrScore
             if ($matchedAbbreviations.Count -gt 0) {
                 $breakdown += "Abbr:$abbrScore($($matchedAbbreviations.Info -join ','))"
             } else {
@@ -1347,7 +1395,7 @@ begin {
                     $matchedAliases += @{ Alias = $alias.Alias; Target = $alias.Target }
                 }
             }
-            $score += $aliasScore
+            $contentScore += $aliasScore
             if ($matchedAliases.Count -gt 0) {
                 $aliasInfo = $matchedAliases | ForEach-Object { "$($_.Alias)->$($_.Target)" }
                 $breakdown += "Alias:$aliasScore($($aliasInfo -join ','))"
@@ -1412,36 +1460,26 @@ begin {
                 }
             }
             
-            # Base score: proportional to match ratio (max 60)
-            $kwScore = [Math]::Round(($matchedCount / $QueryParts.Keywords.Count) * 60, 1)
-            $score += $kwScore
-            
+            # Base score: proportional to match ratio (max 100)
+            $kwScore = [Math]::Round(($matchedCount / $QueryParts.Keywords.Count) * 100, 1)
+            $contentScore += $kwScore
+
             # Bonus for exact match (all keywords found)
             if ($matchedCount -eq $QueryParts.Keywords.Count) {
-                $score += 15
-                $kwScore += 15
+                $contentScore += 20
+                $kwScore += 20
             }
             $breakdown += "Kw:$kwScore($matchedCount/$($QueryParts.Keywords.Count))"
         }
 
-        # Year bonus
-        $yearScore = 0
-        if ($QueryParts.Year -and $Result.Date) {
-            if ($Result.Date -match $QueryParts.Year) {
-                $yearScore = 25
-                $score += $yearScore
-            }
-            $breakdown += "Year:$yearScore"
-        }
-
-        # Event pattern score
+        # Event pattern score (content-based - affected by duration multiplier)
         $patternScore = 0
         if ($QueryParts.EventPatterns.Count -gt 0) {
             $titleLower = $Result.Title.ToLower()
             foreach ($pattern in $QueryParts.EventPatterns) {
                 $num = $pattern.Number
                 $type = $pattern.Type
-                
+
                 if ($type -eq 'Weekend') {
                     $matchPattern = "(?:weekend\s*$num|w$num|we$num)"
                     $wrongPattern = "(?:weekend\s*[0-9]|w[0-9]|we[0-9])"
@@ -1450,7 +1488,7 @@ begin {
                     $matchPattern = "(?:day\s*$num|d$num)"
                     $wrongPattern = "(?:day\s*[0-9]|d[0-9])"
                 }
-                
+
                 if ($titleLower -match $matchPattern) {
                     $patternScore = 40
                 }
@@ -1458,8 +1496,22 @@ begin {
                     $patternScore = -30
                 }
             }
-            $score += $patternScore
+            $contentScore += $patternScore
             $breakdown += "Pat:$patternScore"
+        }
+
+        # Apply duration multiplier to content score
+        # Duration amplifies keyword/content matches but can't create relevance on its own
+        $score = [Math]::Round($contentScore * $durationMultiplier, 1)
+
+        # Year bonus (additive - not affected by duration multiplier)
+        $yearScore = 0
+        if ($QueryParts.Year -and $Result.Date) {
+            if ($Result.Date -match $QueryParts.Year) {
+                $yearScore = 25
+                $score += $yearScore
+            }
+            $breakdown += "Year:$yearScore"
         }
 
         # Recency bonus
@@ -1707,7 +1759,7 @@ begin {
             return $null
         }
 
-        return $Results | Where-Object { $_.Index -eq $num }
+        return $Results | Where-Object { $_.Index -eq $num } | Select-Object -First 1
     }
 
     function Get-1001TracklistIdFromUrl {
@@ -1838,7 +1890,13 @@ begin {
             [string]$MkvMergePath
         )
 
-        $json = & $MkvMergePath --identify --identification-format json $Path 2>$null | ConvertFrom-Json
+        try {
+            $json = & $MkvMergePath --identify --identification-format json $Path 2>$null | ConvertFrom-Json
+        }
+        catch {
+            Write-Verbose "Failed to parse mkvmerge output for '$Path': $_"
+            return $null
+        }
 
         if ($json.container.properties.duration) {
             # Duration is in nanoseconds
@@ -2403,6 +2461,30 @@ process {
         return
     }
 
+    # Expand InputFile: resolve folders to individual files, flatten arrays
+    $filesToProcess = @()
+    foreach ($inputPath in $InputFile) {
+        if (Test-Path -LiteralPath $inputPath -PathType Container) {
+            $resolvedDir = (Resolve-Path -LiteralPath $inputPath).Path
+            if ($Recurse) {
+                $folderFiles = @(Get-ChildItem -LiteralPath $resolvedDir -Include '*.mkv', '*.webm' -Recurse -File)
+            }
+            else {
+                # Use Path with wildcard for reliable -Include filtering without -Recurse
+                $folderFiles = @(Get-ChildItem -Path (Join-Path $resolvedDir '*') -Include '*.mkv', '*.webm' -File)
+            }
+            if ($folderFiles.Count -eq 0) {
+                Write-Warning "No MKV or WEBM files found in: $inputPath"
+            }
+            $filesToProcess += $folderFiles.FullName
+        }
+        else {
+            $filesToProcess += (Resolve-Path -LiteralPath $inputPath).Path
+        }
+    }
+
+    foreach ($currentFile in $filesToProcess) {
+
     # Add delay between files to avoid rate limiting (skip first file)
     if ($script:processedCount -gt 0 -and $DelaySeconds -gt 0) {
         Write-Host "Waiting $DelaySeconds seconds..." -ForegroundColor DarkGray
@@ -2411,7 +2493,7 @@ process {
     $script:processedCount++
 
     try {
-        $currentFile = $InputFile
+        Write-Progress -Activity 'Adding tracklist chapters' -Status "File $($script:processedCount): $(Split-Path $currentFile -Leaf)" -CurrentOperation 'Processing'
         Write-Host ""
         Write-Host ("=" * 80) -ForegroundColor DarkGray
         Write-Host "Processing: " -ForegroundColor Cyan -NoNewline
@@ -2450,7 +2532,7 @@ process {
                     if ($response -match '^[Ss]') {
                         Write-Host "Skipping file." -ForegroundColor Yellow
                         $script:skippedCount++
-                        return
+                        continue
                     }
                     elseif ($response -match '^[Rr]') {
                         Write-Host "Starting new search..." -ForegroundColor Cyan
@@ -2501,7 +2583,7 @@ process {
         $videoDurationMinutes = 0
         if ($tracklistSource.Type -eq 'Search' -and -not $NoDurationFilter) {
             $videoDurationMinutes = Get-VideoDurationMinutes -Path $currentFile -MkvMergePath $MkvMergePath
-            if ($videoDurationMinutes) {
+            if ($null -ne $videoDurationMinutes) {
                 Write-Verbose "Video duration: $videoDurationMinutes minutes"
             }
         }
@@ -2531,7 +2613,7 @@ process {
                     if (-not $tracklistResult) {
                         Write-Host "Cancelled." -ForegroundColor Yellow
                         $script:skippedCount++
-                        return
+                        continue
                     }
                     
                     $trackLines = $tracklistResult.Lines
@@ -2548,7 +2630,7 @@ process {
                             if (-not $tracklistResult) {
                                 Write-Host "Cancelled." -ForegroundColor Yellow
                                 $script:skippedCount++
-                                return
+                                continue
                             }
                             $trackLines = $tracklistResult.Lines
                             $script:tracklistUrl = $tracklistResult.Url
@@ -2598,7 +2680,7 @@ process {
                         # AutoSelect mode: skip gracefully and continue with next file
                         Write-Host "No timestamps available - skipping." -ForegroundColor Yellow
                         $script:skippedCount++
-                        return
+                        continue
                     }
                     else {
                         # Interactive mode: offer skip or new search
@@ -2610,7 +2692,7 @@ process {
                         if ($retryResponse -match '^[Ss]') {
                             Write-Host "Skipping file." -ForegroundColor Yellow
                             $script:skippedCount++
-                            return
+                            continue
                         }
                         
                         # Switch to search mode for retry - build search query from filename
@@ -2622,7 +2704,7 @@ process {
                         # Calculate video duration if not already done (needed for search filtering)
                         if ($videoDurationMinutes -eq 0 -and -not $NoDurationFilter) {
                             $videoDurationMinutes = Get-VideoDurationMinutes -Path $currentFile -MkvMergePath $MkvMergePath
-                            if ($videoDurationMinutes) {
+                            if ($null -ne $videoDurationMinutes) {
                                 Write-Verbose "Video duration: $videoDurationMinutes minutes"
                             }
                         }
@@ -2653,7 +2735,7 @@ process {
                 'Timestamp'
                 'Title'
             ) -AutoSize
-            return
+            continue
         }
 
         # Determine output file
@@ -2667,12 +2749,17 @@ process {
         if ($chaptersIdentical -and $storedInfo) {
             Write-Host "Already up-to-date - skipping." -ForegroundColor DarkGray
             $script:upToDateCount++
-            return
+            continue
         }
         
         # If chapters are identical but URL not stored, we still need to update to add the URL
         if ($chaptersIdentical -and $script:tracklistUrl) {
             Write-Host "Chapters identical, but adding tracklist URL to file..." -ForegroundColor Cyan
+        }
+
+        # ShouldProcess check for -WhatIf/-Confirm support
+        if (-not $PSCmdlet.ShouldProcess($resolvedInputFile, 'Add chapter markers')) {
+            continue
         }
 
         # Determine the target file for mkvpropedit
@@ -2746,6 +2833,8 @@ process {
         Write-Error "Error processing $currentFile`: $_"
         $script:errorCount++
     }
+
+    } # end foreach $currentFile
 }
 
 end {
@@ -2753,6 +2842,8 @@ end {
     if ($script:SkipAllProcessing -or $PSCmdlet.ParameterSetName -eq 'CreateConfig') {
         return
     }
+
+    Write-Progress -Activity 'Adding tracklist chapters' -Completed
 
     # Show summary if multiple files were processed
     $totalFiles = $script:addedCount + $script:upToDateCount + $script:skippedCount + $script:errorCount

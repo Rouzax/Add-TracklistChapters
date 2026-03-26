@@ -1,5 +1,7 @@
 # Add-TracklistChapters
 
+[![Version](https://img.shields.io/badge/version-2.0.0-blue)](#changelog)
+
 Automatically add chapter markers to video files using tracklists from [1001Tracklists.com](https://www.1001tracklists.com).
 
 Navigate DJ sets, live recordings, and music mixes track by track.
@@ -20,7 +22,8 @@ Navigate DJ sets, live recordings, and music mixes track by track.
 - 🕐 **Future Timestamp Pickup** - Tags files with tracklist URL even when timestamps aren't available yet
 - 📦 **Pipeline Support** - Batch process multiple files via PowerShell pipeline
 - ⏭️ **Auto-Select Mode** - Fully automated chapter embedding for batch processing
-- 🛡️ **Rate Limit Protection** - Configurable delay between requests to avoid 1001Tracklists rate limits
+- 🛡️ **Rate Limit Protection** - Configurable delay between requests, automatic retry with backoff on rate limits
+- ✅ **WhatIf/Confirm Support** - Standard PowerShell `-WhatIf` and `-Confirm` support for safe operation
 
 ## Requirements
 
@@ -61,6 +64,21 @@ Simply provide a video file - the script will search using the filename:
 ```
 
 This searches for "2025 AMF Sub Zero Project" and presents matching tracklists for selection.
+
+### Process a Folder
+
+Point directly at a folder to process all MKV/WEBM files in it:
+
+```powershell
+# Top-level files only
+.\Add-TracklistChapters.ps1 -InputFile "D:\DJ Sets" -AutoSelect -ReplaceOriginal
+
+# Include subfolders
+.\Add-TracklistChapters.ps1 -InputFile "D:\DJ Sets" -Recurse -AutoSelect -ReplaceOriginal
+
+# Mix folders and files
+.\Add-TracklistChapters.ps1 "D:\Ultra", "D:\EDC", "special-set.mkv" -AutoSelect
+```
 
 ### Automated Mode
 
@@ -163,13 +181,31 @@ The script uses intelligent relevance scoring to find the best matching tracklis
 
 ### Scoring Factors
 
+The scoring uses a **multiplicative approach**: content relevance (keywords, abbreviations, etc.) is the primary signal, and duration acts as a multiplier that amplifies good matches. This prevents duration-only matches from outranking content-relevant results (e.g., a random set with matching duration beating the correct artist/event).
+
+**Content score** (multiplied by duration):
+
 | Factor | Points | Description |
 |--------|--------|-------------|
-| **Duration** | -20 to +100 | ±1 min = 100, ±5 min = 80, ±15 min = 40, ±30 min = 10, >30 min = -20 |
-| **Keywords** | 0 to 75 | Proportional to matched keywords, +15 bonus if all match |
+| **Keywords** | 0 to 120 | Proportional to matched keywords (max 100), +20 bonus if all match |
 | **Abbreviations** | +35 each | `AMF` → "Amsterdam Music Festival", `EDC` → "Electric Daisy Carnival" |
 | **Aliases** | +35 each | Matches from aliases.json (case-insensitive), e.g., `tml` → "Tomorrowland" |
 | **Event Patterns** | -30 to +40 | Correct pattern = +40, wrong pattern = -30 |
+
+**Duration multiplier** (applied to content score):
+
+| Difference | Multiplier | Meaning |
+|------------|------------|---------|
+| ±1 min | 2.0x | Exact match — almost certainly the same recording |
+| ±5 min | 1.8x | Close match — likely same recording |
+| ±15 min | 1.4x | Moderate — possibly edited or partial |
+| ±30 min | 1.1x | Significant — unlikely same recording |
+| >30 min | 0.8x | Very different — reduces score |
+
+**Additive bonuses** (not multiplied):
+
+| Factor | Points | Description |
+|--------|--------|-------------|
 | **Year** | +25 | Matches year in query to tracklist date |
 | **Recency** | 0 to 10 | Minor tiebreaker favoring newer tracklists |
 
@@ -196,11 +232,11 @@ The script automatically handles common filename patterns:
 Query: "2025 - TML Belgium - Hardwell WE1"
 QueryParts: Year=2025, Keywords=[tml, belgium, hardwell, we1], Aliases=[TML->Tomorrowland], EventPatterns=[Weekend1]
 
-Score 290.1 for 'Hardwell @ Mainstage, Tomorrowland Weekend 1, Belgium...'
-      [Dur:100(1m diff) | Alias:35(TML->Tomorrowland) | Kw:75(4/4) | Year:25 | Pat:40 | Rec:5.1]
+Score 355.1 for 'Hardwell @ Mainstage, Tomorrowland Weekend 1, Belgium...'
+      [Dur:x2.0(1m diff) | Alias:35(TML->Tomorrowland) | Kw:120(4/4) | Pat:40 | Year:25 | Rec:5.1]
 
-Score 124.9 for 'Hardwell @ Mainstage, Tomorrowland Weekend 2, Belgium...'
-      [Dur:100(1m diff) | Alias:35(TML->Tomorrowland) | Kw:45(3/4) | Year:25 | Pat:-30 | Rec:5.9]  ← Wrong weekend, penalized
+Score 185.9 for 'Hardwell @ Mainstage, Tomorrowland Weekend 2, Belgium...'
+      [Dur:x2.0(1m diff) | Alias:35(TML->Tomorrowland) | Kw:75(3/4) | Pat:-30 | Year:25 | Rec:5.9]  ← Wrong weekend, penalized
 ```
 
 **Abbreviation matching (AMF, EDC):**
@@ -208,11 +244,11 @@ Score 124.9 for 'Hardwell @ Mainstage, Tomorrowland Weekend 2, Belgium...'
 Query: "2025 AMF KI/KI B2B Armin van Buuren"
 QueryParts: Year=2025, Keywords=[amf, ki/ki, b2b, armin, van, buuren], Abbreviations=[AMF]
 
-Score 184.2 for 'Armin van Buuren & KI/KI @ Two Is One, Amsterdam Music Festival...'
-      [Dur:80(4m diff) | Abbr:35(AMF=AMF) | Kw:40(4/6) | Year:25 | Rec:4.2]  ← AMF matched
+Score 226.2 for 'Armin van Buuren & KI/KI @ Two Is One, Amsterdam Music Festival...'
+      [Dur:x1.8(4m diff) | Abbr:35(AMF=AMF) | Kw:66.7(4/6) | Year:25 | Rec:4.2]  ← AMF matched
 
-Score 141.8 for 'Armin van Buuren - Piano...'
-      [Dur:80(5m diff) | Abbr:0 | Kw:30(3/6) | Year:25 | Rec:6.8]            ← No abbreviation match
+Score 179.8 for 'Armin van Buuren - Piano...'
+      [Dur:x1.8(5m diff) | Abbr:0 | Kw:50(3/6) | Year:25 | Rec:6.8]               ← No abbreviation match
 ```
 
 **YouTube ID stripping:**
@@ -220,8 +256,8 @@ Score 141.8 for 'Armin van Buuren - Piano...'
 Query: "Marlon Hoffstadt Live at EDC Las Vegas 2025 [JX2STP6HL5k]"
        → YouTube ID stripped, EDC detected as abbreviation
 
-Score 178.2 for 'Marlon Hoffstadt @ kineticFIELD, EDC Las Vegas...'
-      [Dur:100(0m diff) | Abbr:35(EDC(direct)) | Kw:38.2(7/11) | Rec:5]
+Score 171.4 for 'Marlon Hoffstadt @ kineticFIELD, EDC Las Vegas...'
+      [Dur:x2.0(0m diff) | Abbr:35(EDC(direct)) | Kw:63.6(7/11) | Rec:5]
 ```
 
 **Accent-insensitive matching:**
@@ -229,8 +265,8 @@ Score 178.2 for 'Marlon Hoffstadt @ kineticFIELD, EDC Las Vegas...'
 Query: "Tiësto - Dreamstate 2025 (Full Set)"
        → Tiësto normalized for matching
 
-Score 164.9 for 'Tiësto @ The Dream Stage, Dreamstate SoCal...'
-      [Dur:100(0m diff) | Kw:30(2/4) | Year:25 | Rec:9.9]
+Score 134.9 for 'Tiësto @ The Dream Stage, Dreamstate SoCal...'
+      [Dur:x2.0(0m diff) | Kw:50(2/4) | Year:25 | Rec:9.9]
 ```
 
 **Alias matching (lowercase/unofficial abbreviations):**
@@ -238,18 +274,18 @@ Score 164.9 for 'Tiësto @ The Dream Stage, Dreamstate SoCal...'
 Query: "armin van buuren - asot 2025 - utrecht"
        → asot matched via aliases.json to "A State of Trance"
 
-Score 184.5 for 'Armin van Buuren @ A State of Trance 1000, Utrecht...'
-      [Dur:100(0m diff) | Alias:35(asot->A State of Trance) | Kw:45(4/6) | Year:25 | Rec:4.5]
+Score 199.5 for 'Armin van Buuren @ A State of Trance 1000, Utrecht...'
+      [Dur:x2.0(0m diff) | Alias:35(asot->A State of Trance) | Kw:66.7(4/6) | Year:25 | Rec:4.5]
 ```
 
 ### Score Interpretation
 
 | Score Range | Meaning |
 |-------------|---------|
-| 200+ | Excellent match - likely the exact recording |
-| 150-200 | Good match - probably correct |
-| 100-150 | Partial match - review manually |
-| <100 | Poor match - likely wrong tracklist |
+| 250+ | Excellent match - likely the exact recording |
+| 150-250 | Good match - probably correct |
+| 80-150 | Partial match - review manually |
+| <80 | Poor match - likely wrong tracklist |
 
 ## Search Results Display
 
@@ -275,15 +311,18 @@ Search Results (video: 47m):
 
 | Parameter | Description |
 |-----------|-------------|
-| `-InputFile` | Video file to add chapters to (MKV or WEBM). Accepts pipeline input. |
+| `-InputFile` | One or more MKV/WEBM files or folders to process. Accepts pipeline input. |
 | `-Tracklist` | Search query, URL, or tracklist ID |
 | `-TrackListFile` | Local text file with timestamps |
 | `-FromClipboard` | Read tracklist from clipboard |
 | `-AutoSelect` | Automatically select the top result |
 | `-DelaySeconds` | Delay between files in pipeline mode (default: 5, range: 0-60) |
 | `-NoDurationFilter` | Disable duration-based result filtering |
-| `-Preview` | Show chapters without modifying file |
+| `-Preview` | Show chapters without modifying file (alias for `-WhatIf`) |
+| `-WhatIf` | Show what would happen without making changes |
+| `-Confirm` | Prompt for confirmation before modifying each file |
 | `-IgnoreStoredUrl` | Force fresh search, ignoring any stored tracklist URL |
+| `-Recurse` | When InputFile is a folder, include subfolders |
 | `-ReplaceOriginal` | Replace original file instead of creating new |
 | `-OutputFile` | Custom output filename |
 | `-ChapterLanguage` | Chapter language code (default: `eng`) |
@@ -381,13 +420,14 @@ Login cookies are cached in `.1001tl-cookies.json` in the script directory. This
 1001Tracklists.com has rate limits to prevent abuse. The script includes several protections:
 
 - **Automatic delay**: A configurable delay (default: 5 seconds) is added between files in pipeline mode
-- **Detection**: Rate limit responses are detected and reported clearly
-- **Auto-recovery**: When rate limited, the cookie cache is automatically deleted so the next run starts fresh after you solve the captcha
+- **Detection**: Both HTTP 429 status codes and rate limit page content are detected
+- **Auto-retry**: When rate limited, the script waits 30 seconds and retries once before giving up
+- **Session preservation**: Rate limits don't invalidate your session — cookies are preserved for the retry
 
-If you encounter a rate limit:
+If the auto-retry fails:
 1. Visit 1001Tracklists.com in your browser
 2. Solve the captcha
-3. Re-run the script (it will create a fresh login session)
+3. Re-run the script (your existing session will still work)
 
 ### Duplicate Chapter Detection
 
@@ -466,9 +506,9 @@ When using filename-based search, the script:
 - Check if the tracklist exists on 1001Tracklists.com
 
 **"Rate limited by 1001Tracklists"**
-- Visit 1001Tracklists.com in your browser and solve the captcha
-- The script automatically deletes the cookie cache when rate limited
-- Re-run the script to create a fresh session
+- The script automatically retries once after a 30-second wait
+- If the retry also fails, visit 1001Tracklists.com in your browser and solve the captcha
+- Re-run the script (your session cookies are preserved)
 - Consider increasing `-DelaySeconds` for batch processing
 
 **"This tracklist has no timestamps yet"**
@@ -497,3 +537,7 @@ When using filename-based search, the script:
 
 **Cookie/session errors**
 - Delete `.1001tl-cookies.json` in the script directory to force a fresh login
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes.
