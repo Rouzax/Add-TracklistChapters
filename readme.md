@@ -6,6 +6,8 @@ Automatically add chapter markers to video files using tracklists from [1001Trac
 
 Navigate DJ sets, live recordings, and music mixes track by track.
 
+![Search Results](assets/search-results.png)
+
 ## Features
 
 - 🔍 **Smart Search** - Search 1001Tracklists.com directly from the command line
