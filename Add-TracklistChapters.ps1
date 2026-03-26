@@ -1,3 +1,4 @@
+#requires -Version 7.0
 <#
 .SYNOPSIS
     Adds or replaces chapters in an MKV or WEBM file using mkvmerge.
@@ -2592,7 +2593,8 @@ process {
         # Loop to allow re-selection if tracklist has no timestamps (interactive mode only)
         $trackLines = $null
         $retrySelection = $true
-        
+        $skipFile = $false
+
         while ($retrySelection) {
             $retrySelection = $false
             
@@ -2680,7 +2682,8 @@ process {
                         # AutoSelect mode: skip gracefully and continue with next file
                         Write-Host "No timestamps available - skipping." -ForegroundColor Yellow
                         $script:skippedCount++
-                        continue
+                        $skipFile = $true
+                        break
                     }
                     else {
                         # Interactive mode: offer skip or new search
@@ -2688,11 +2691,12 @@ process {
                         Write-Host ""
                         Write-Host "  R = Retry search  |  S = Skip file" -ForegroundColor DarkGray
                         $retryResponse = Read-Host "Retry or skip? (R/s)"
-                        
+
                         if ($retryResponse -match '^[Ss]') {
                             Write-Host "Skipping file." -ForegroundColor Yellow
                             $script:skippedCount++
-                            continue
+                            $skipFile = $true
+                            break
                         }
                         
                         # Switch to search mode for retry - build search query from filename
@@ -2719,6 +2723,9 @@ process {
             
             $trackLines = $filteredLines
         }
+
+        # Skip to next file if no-timestamps path set the flag
+        if ($skipFile) { continue }
 
         $chapters = @(foreach ($line in $trackLines) {
             ConvertTo-Chapter -Line $line -Language $ChapterLanguage
